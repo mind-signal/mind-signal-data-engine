@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     dual_2pc_subject_index: int | None = None
     lan_ip: str | None = None  # LAN IP override (없으면 socket 자동 탐지)
 
+    # Proxy 연동 (engine-proxy-sync Phase 18)
+    proxy_url: str | None = None  # env PROXY_URL
+    alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+
     # Emotiv
     client_id: str = ""
     client_secret: str = ""

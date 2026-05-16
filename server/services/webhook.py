@@ -97,6 +97,40 @@ async def unregister_to_backend_pending(
         print(f"[WARN] pending unregister failed (soft): {e}")
 
 
+async def register_to_proxy(
+    proxy_url: str,
+    subject_index: int,
+    public_url: str,
+    secret_key: str,
+) -> None:
+    """프록시에 엔진 URL + subject_idx 등록 완료.
+
+    Args:
+        proxy_url: 프록시 서버 베이스 URL.
+        subject_index: 피실험자 인덱스 (subject_idx 필드로 전달).
+        public_url: 등록할 DE 퍼블릭 URL (de_url 필드로 전달).
+        secret_key: X-Engine-Secret 헤더로 전달되는 공유 시크릿.
+
+    Raises:
+        httpx.HTTPStatusError: 프록시가 4xx/5xx 응답 반환 시.
+        httpx.RequestError: 네트워크 오류 발생 시.
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{proxy_url}/register",
+            headers={
+                "X-Engine-Secret": secret_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "subject_idx": subject_index,
+                "de_url": public_url,
+            },
+        )
+        response.raise_for_status()
+    print(f"proxy 등록 완료: subject_idx={subject_index} url={public_url}")
+
+
 async def start_heartbeat(public_url: str, secret_key: str):
     """주기적으로 백엔드에 엔진 URL을 재등록하는 heartbeat 태스크임 (SEQUENTIAL mode 전용)"""
     while True:
