@@ -16,6 +16,7 @@ from redis.retry import Retry
 
 from core.analyzer import MindSignalAnalyzer
 from sdk.cortex import Cortex
+from server.services.proxy_client import ProxyForwardError, post_sample
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,18 @@ class MindSignalStreamer(Cortex):
     [Engine] EEG 시계열 버퍼링 및 분석을 통해 실시간 데이터를 발행하는 스트리머임
     """
 
-    def __init__(self, group_id, subject_index, *args, headset_id="", **kwargs):
+    def __init__(
+        self,
+        group_id,
+        subject_index,
+        *args,
+        headset_id="",
+        alignment_location: str = "be",
+        proxy_url: str | None = None,
+        engine_secret_key: str = "",
+        max_proxy_post_retries: int = 2,
+        **kwargs,
+    ):
         if headset_id:
             kwargs["headset_id"] = headset_id
         super().__init__(*args, **kwargs)
@@ -40,6 +52,15 @@ class MindSignalStreamer(Cortex):
 
         self.duration_min = int(os.getenv("EXPERIMENT_DURATION_MINUTES", 10))
         self.duration_sec = self.duration_min * 60
+
+        # proxy 연동 설정 저장함 (alignment_location="proxy" 시 proxy 모드 활성화)
+        self.alignment_location = alignment_location
+        self.proxy_url = proxy_url
+        self.engine_secret_key = engine_secret_key
+        self.max_proxy_post_retries = max_proxy_post_retries
+
+        # 엔진 단위 단조 증가 시퀀스 카운터 초기화함 (proxy 모드 전용)
+        self.seq = 0
 
         # 2. Redis 채널 설정 및 연결 수행함 (REDIS_URL 우선, 없으면 HOST/PORT 폴백)
         self.channel = f"mind-signal:{self.group_id}:subject:{self.subject_index}"
@@ -262,19 +283,48 @@ class MindSignalStreamer(Cortex):
             )
             self.csv_file.flush()
 
-            # 2. Redis 실시간 발행 수행함
-            payload = {
-                "type": "brain_sync_all",
-                "groupId": self.group_id,
-                "subjectIndex": self.subject_index,
-                "waves": powers,
-                "metrics": self.latest_met,
-                "time": formatted_time,
-            }
-            try:
-                self.r.publish(self.channel, json.dumps(payload))
-            except (ConnectionError, TimeoutError, ConnectionResetError) as e:
-                logger.warning(f"Redis publish 실패 (CSV 저장은 계속): {e}")
+            # 2. alignment_location에 따라 proxy 또는 Redis로 샘플 발행함
+            if self.alignment_location == "proxy":
+                # proxy 모드 — 시퀀스 증가 후 HTTP로 포워딩함
+                self.seq += 1
+                try:
+                    post_sample(
+                        proxy_url=self.proxy_url,
+                        secret_key=self.engine_secret_key,
+                        group_id=self.group_id,
+                        subject_idx=self.subject_index,
+                        seq=self.seq,
+                        payload=powers,
+                        sync_meta={"de_clock_domain": "monotonic_ns"},
+                        max_retries=self.max_proxy_post_retries,
+                    )
+                except ProxyForwardError:
+                    # retry 소진 — FAIL_CLOSED: 측정 즉시 중단함
+                    print(
+                        "[FAIL_CLOSED] proxy 전송 retry 소진 — 측정 중단함"
+                        f" (subject {self.subject_index})"
+                    )
+                    try:
+                        self.close_session()
+                    except Exception as e:
+                        logger.warning(f"close_session 실패 (무시): {e}")
+                    finally:
+                        self.close()
+                    return
+            else:
+                # be 모드 (기본) — Redis pub/sub 발행함 (byte-identical 유지)
+                payload = {
+                    "type": "brain_sync_all",
+                    "groupId": self.group_id,
+                    "subjectIndex": self.subject_index,
+                    "waves": powers,
+                    "metrics": self.latest_met,
+                    "time": formatted_time,
+                }
+                try:
+                    self.r.publish(self.channel, json.dumps(payload))
+                except (ConnectionError, TimeoutError, ConnectionResetError) as e:
+                    logger.warning(f"Redis publish 실패 (CSV 저장은 계속): {e}")
 
             # 분석 완료 후 버퍼 초기화함 (비오버랩 방식)
             self.eeg_buffer = []
