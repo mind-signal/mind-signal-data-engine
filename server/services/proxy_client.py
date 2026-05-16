@@ -15,6 +15,65 @@ class ProxyForwardError(Exception):
     pass
 
 
+def check_health(proxy_url: str, timeout: float = 5.0) -> bool:
+    """proxy /health 폴링하여 정상 여부 반환함. 200 ok→True, 503/네트워크오류→False.
+
+    Args:
+        proxy_url: 프록시 서버 베이스 URL.
+        timeout: HTTP 요청 타임아웃(초).
+
+    Returns:
+        HTTP 200 응답 시 True, 그 외(503/비200/네트워크 오류) False 반환함.
+    """
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(f"{proxy_url}/health")
+            return response.status_code == 200
+    except httpx.RequestError:
+        return False
+
+
+class ProxyHealthTracker:
+    """proxy /health 폴링 결과를 누적하여 fail-closed 발동 여부 판단하는 트래커임.
+
+    스레드 없이 순수하게 상태만 추적함 — I/O 없음, time.time() 미사용.
+    호출자가 now_sec(float)를 직접 전달하여 테스트 용이성 보장함.
+    """
+
+    def __init__(self, threshold_ms: int) -> None:
+        """트래커 초기화함.
+
+        Args:
+            threshold_ms: fail 연속 지속 임계값(밀리초). 이 값 이상 지속 시 발동함.
+        """
+        self._threshold_ms = threshold_ms
+        self._first_fail_sec: float | None = None
+
+    def record(self, healthy: bool, now_sec: float) -> bool:
+        """폴링 결과 기록. fail이 threshold_ms 이상 연속 지속 시 True(=fail-closed 발동) 반환함.
+
+        healthy=True 시 내부 상태 reset.
+
+        Args:
+            healthy: True이면 정상 응답, False이면 비정상(503/연결 오류).
+            now_sec: 현재 시각(초, 단조 시계). 호출자가 time.monotonic() 전달함.
+
+        Returns:
+            fail-closed 발동 시 True, 미발동 시 False 반환함.
+        """
+        if healthy:
+            self._first_fail_sec = None
+            return False
+
+        # healthy=False 처리 수행함
+        if self._first_fail_sec is None:
+            self._first_fail_sec = now_sec
+            return False
+
+        elapsed_ms = (now_sec - self._first_fail_sec) * 1000
+        return elapsed_ms >= self._threshold_ms
+
+
 def post_sample(
     proxy_url: str,
     secret_key: str,

@@ -175,3 +175,126 @@ def test_post_sample_503_retry_exhausted_raises(
     # Redis 미포함 검증 — proxy_client 모듈에 redis import 부재 확인함
     source = inspect.getsource(proxy_client)
     assert "redis" not in source.lower(), "proxy_client에 redis import가 있어서는 안 됨"
+
+
+# ──────────────────────────────────────────────
+# T1-DE-C: check_health 단위 테스트 (pytest-httpx)
+# ──────────────────────────────────────────────
+HEALTH_URL = f"{MOCK_PROXY_URL}/health"
+
+
+def test_check_health_200_ok_returns_true(httpx_mock: HTTPXMock) -> None:
+    """200 응답 시 True 반환 확인함"""
+    from server.services.proxy_client import check_health
+
+    httpx_mock.add_response(
+        url=HEALTH_URL,
+        method="GET",
+        status_code=200,
+        json={"status": "ok", "version": "1.0.0"},
+    )
+
+    result = check_health(MOCK_PROXY_URL)
+    assert result is True
+
+
+def test_check_health_503_fail_closed_returns_false(httpx_mock: HTTPXMock) -> None:
+    """503 응답 시 False 반환 확인함"""
+    from server.services.proxy_client import check_health
+
+    httpx_mock.add_response(
+        url=HEALTH_URL,
+        method="GET",
+        status_code=503,
+        json={"status": "fail_closed", "version": "1.0.0"},
+    )
+
+    result = check_health(MOCK_PROXY_URL)
+    assert result is False
+
+
+def test_check_health_connection_error_returns_false(httpx_mock: HTTPXMock) -> None:
+    """연결 오류 시 예외 미발생, False 반환 확인함"""
+    import httpx as _httpx
+
+    from server.services.proxy_client import check_health
+
+    httpx_mock.add_exception(
+        _httpx.ConnectError("Connection refused"),
+        url=HEALTH_URL,
+        method="GET",
+    )
+
+    result = check_health(MOCK_PROXY_URL)
+    assert result is False
+
+
+# ──────────────────────────────────────────────
+# T1-DE-C: ProxyHealthTracker 순수 단위 테스트 (모킹 없음)
+# ──────────────────────────────────────────────
+
+
+def test_tracker_healthy_returns_false_and_resets() -> None:
+    """healthy=True 시 False 반환 및 내부 상태 reset 확인함"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    # healthy 상태에서는 항상 False 반환함
+    assert tracker.record(True, 0.0) is False
+    assert tracker.record(True, 100.0) is False
+
+
+def test_tracker_first_fail_returns_false() -> None:
+    """최초 fail 기록 시 False 반환 확인함 (threshold 미도달)"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    # 첫 번째 fail — threshold 미도달임
+    assert tracker.record(False, 0.0) is False
+
+
+def test_tracker_fail_below_threshold_returns_false() -> None:
+    """fail 지속 시간이 threshold 미만이면 False 반환 확인함"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    tracker.record(False, 0.0)  # _first_fail_sec = 0.0
+    # 2999ms 경과 — threshold 미도달임
+    assert tracker.record(False, 2.999) is False
+
+
+def test_tracker_fail_at_threshold_returns_true() -> None:
+    """fail 지속 시간이 threshold 정확히 도달하면 True 반환 확인함"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    tracker.record(False, 0.0)  # _first_fail_sec = 0.0
+    # 3000ms 정확히 도달 — True 반환해야 함
+    assert tracker.record(False, 3.0) is True
+
+
+def test_tracker_latched_true_on_continued_fail() -> None:
+    """threshold 초과 후 계속 fail 시 True 유지(latch) 확인함"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    tracker.record(False, 0.0)
+    tracker.record(False, 3.0)  # trip
+    # 이후 추가 fail 에서도 True 유지됨
+    assert tracker.record(False, 4.0) is True
+    assert tracker.record(False, 10.0) is True
+
+
+def test_tracker_healthy_after_trip_resets_to_false() -> None:
+    """trip 후 healthy=True 입력 시 상태 reset → False 반환 확인함"""
+    from server.services.proxy_client import ProxyHealthTracker
+
+    tracker = ProxyHealthTracker(threshold_ms=3000)
+    tracker.record(False, 0.0)
+    tracker.record(False, 3.0)  # trip
+    # healthy 복구 시 reset됨
+    assert tracker.record(True, 4.0) is False
+    # 재차 fail 시 새로 카운트 시작함
+    assert tracker.record(False, 5.0) is False  # 첫 fail — threshold 미도달
+    assert tracker.record(False, 7.999) is False  # 2999ms 미도달
+    assert tracker.record(False, 8.0) is True  # 3000ms 도달 — True

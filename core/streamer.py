@@ -16,7 +16,12 @@ from redis.retry import Retry
 
 from core.analyzer import MindSignalAnalyzer
 from sdk.cortex import Cortex
-from server.services.proxy_client import ProxyForwardError, post_sample
+from server.services.proxy_client import (
+    ProxyForwardError,
+    ProxyHealthTracker,
+    check_health,
+    post_sample,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,8 @@ class MindSignalStreamer(Cortex):
         proxy_url: str | None = None,
         engine_secret_key: str = "",
         max_proxy_post_retries: int = 2,
+        proxy_health_poll_interval_sec: float = 1.0,
+        proxy_fail_closed_threshold_ms: int = 3000,
         **kwargs,
     ):
         if headset_id:
@@ -58,9 +65,14 @@ class MindSignalStreamer(Cortex):
         self.proxy_url = proxy_url
         self.engine_secret_key = engine_secret_key
         self.max_proxy_post_retries = max_proxy_post_retries
+        self.proxy_health_poll_interval_sec = proxy_health_poll_interval_sec
+        self.proxy_fail_closed_threshold_ms = proxy_fail_closed_threshold_ms
 
         # 엔진 단위 단조 증가 시퀀스 카운터 초기화함 (proxy 모드 전용)
         self.seq = 0
+
+        # fail-closed 중복 발동 방지 플래그 초기화함
+        self._fail_closed_triggered = False
 
         # 2. Redis 채널 설정 및 연결 수행함 (REDIS_URL 우선, 없으면 HOST/PORT 폴백)
         self.channel = f"mind-signal:{self.group_id}:subject:{self.subject_index}"
@@ -177,7 +189,37 @@ class MindSignalStreamer(Cortex):
         self._watchdog_active = True
         self._start_watchdog()
 
+        # proxy 모드 시 health 폴링 데몬 시작함
+        if self.alignment_location == "proxy":
+            self._start_proxy_health_monitor()
+
         self.sub_request(["eeg", "met"])
+
+    def _start_proxy_health_monitor(self):
+        """proxy /health 폴링으로 fail-closed 감지 시 측정 중단 수행하는 데몬 스레드 시작함"""
+        tracker = ProxyHealthTracker(self.proxy_fail_closed_threshold_ms)
+
+        def _check():
+            while self._watchdog_active:
+                healthy = check_health(self.proxy_url)
+                tripped = tracker.record(healthy, time.monotonic())
+                if tripped and not self._fail_closed_triggered:
+                    self._fail_closed_triggered = True
+                    print(
+                        "[FAIL_CLOSED] proxy /health fail-closed 지속"
+                        f" — 측정 중단함 (subject {self.subject_index})"
+                    )
+                    try:
+                        self.close_session()
+                    except Exception as e:
+                        logger.warning(f"close_session 실패 (무시): {e}")
+                    finally:
+                        self.close()
+                    break
+                time.sleep(self.proxy_health_poll_interval_sec)
+
+        t = threading.Thread(target=_check, daemon=True)
+        t.start()
 
     def _start_watchdog(self):
         """무데이터 감지 watchdog 스레드 시작함"""
@@ -299,17 +341,19 @@ class MindSignalStreamer(Cortex):
                         max_retries=self.max_proxy_post_retries,
                     )
                 except ProxyForwardError:
-                    # retry 소진 — FAIL_CLOSED: 측정 즉시 중단함
-                    print(
-                        "[FAIL_CLOSED] proxy 전송 retry 소진 — 측정 중단함"
-                        f" (subject {self.subject_index})"
-                    )
-                    try:
-                        self.close_session()
-                    except Exception as e:
-                        logger.warning(f"close_session 실패 (무시): {e}")
-                    finally:
-                        self.close()
+                    # retry 소진 — FAIL_CLOSED: 측정 즉시 중단함 (중복 발동 방지)
+                    if not self._fail_closed_triggered:
+                        self._fail_closed_triggered = True
+                        print(
+                            "[FAIL_CLOSED] proxy 전송 retry 소진 — 측정 중단함"
+                            f" (subject {self.subject_index})"
+                        )
+                        try:
+                            self.close_session()
+                        except Exception as e:
+                            logger.warning(f"close_session 실패 (무시): {e}")
+                        finally:
+                            self.close()
                     return
             else:
                 # be 모드 (기본) — Redis pub/sub 발행함 (byte-identical 유지)

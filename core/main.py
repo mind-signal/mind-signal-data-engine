@@ -38,6 +38,10 @@ def main():
     engine_secret_key = os.getenv("ENGINE_SECRET_KEY", "")
     max_proxy_post_retries_raw = os.getenv("MAX_PROXY_POST_RETRIES", "2")
     max_proxy_post_retries = int(max_proxy_post_retries_raw)
+    proxy_health_poll_interval_sec = (
+        int(os.getenv("PROXY_HEALTH_POLL_INTERVAL_MS", "1000")) / 1000.0
+    )
+    proxy_fail_closed_threshold_ms = int(os.getenv("FAIL_CLOSED_THRESHOLD_MS", "3000"))
 
     print(f"Mind Signal Engine 구동 시작함 (Group: {group_id}, Index: {subject_index})")
     if headset_id:
@@ -59,6 +63,8 @@ def main():
         proxy_url=proxy_url,
         engine_secret_key=engine_secret_key,
         max_proxy_post_retries=max_proxy_post_retries,
+        proxy_health_poll_interval_sec=proxy_health_poll_interval_sec,
+        proxy_fail_closed_threshold_ms=proxy_fail_closed_threshold_ms,
     )
     streamer.open()
 
