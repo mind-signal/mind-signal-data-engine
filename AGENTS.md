@@ -76,6 +76,16 @@ ENGINE_SECRET_KEY=<shared_secret>
 
 Redis 채널은 `core.main`의 인수(groupId, subjectIndex)로 동적 결정 — 환경변수 불필요.
 
+### Phase migration 환경변수 cleanup 룰
+
+Phase migration 진행 시 `.env.local` 또는 `.env.example`에 박제된 환경변수 중 이전 Phase 전용으로 남아 있는 값은 cleanup 의무. 5/26 D-0 시연 setup 도중 노출된 사례:
+
+- Phase 17 `REGISTRATION_MODE=ngrok` 잔재 — Phase 18 proxy mode 환경에서 사용 시 `public_url`을 proxy `/register`로 보낼 때 ngrok URL 등록 risk 발생함. proxy mode 환경에선 `REGISTRATION_MODE=local` 의무함.
+- Phase 18 `ALIGNMENT_LOCATION` + `PROXY_URL` 신규 추가 — proxy mode 활성화 트리거. `.env.example`에 빈 값 default 박제로 proxy mode 미사용 시 자연 비활성화 정합함.
+- `LAN_IP` 운영자 명시 override 권장 — 5/26 D-0 학교 Wi-Fi 환경에서 `socket.gethostbyname` 자동 탐지가 다중 인터페이스(학교 Wi-Fi + 핫스팟 broadcast) 시 부정확 발견함. 분기 박제: operator PC = proxy 동일 머신 시 `127.0.0.1`, 노트북 B = DE_B 별개 머신 시 핫스팟 어댑터 IPv4.
+
+Phase migration PR scope에 `.env.example` 정합 확인 + AGENTS.md 본 절 amend 의무 (transitive 상속 박제 갭 차단). 옵시디언 [[2026-05-26-phase-18.1-d-0-hotspot-pivot-postponed]] 핵심 발견 6 + [[2026-05-26-track-1-doc-governance-correction-done]] 핵심 발견 2 정합.
+
 ---
 
 ## 5. 코드 스타일
