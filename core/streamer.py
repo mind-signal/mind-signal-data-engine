@@ -151,6 +151,55 @@ class MindSignalStreamer(Cortex):
         print(f"스트리밍 채널 활성화됨: {self.channel}")
         print(f"데이터 저장 경로: {self.csv_path}")
 
+    def _handle_query_headset(self, result_dic):
+        """헤드셋 ID 불일치 시 단일 연결 헤드셋으로 폴백 수행함 (D6).
+
+        sdk/cortex.py 의 동명 메서드를 오버라이드함. 다음 세 가지 경우를 처리함:
+        - 설정 ID와 연결 헤드셋 ID가 일치 → 부모 메서드 위임 (기존 동작 보존)
+        - 불일치이고 연결 헤드셋이 정확히 1대 → 해당 헤드셋으로 폴백 후 부모 위임
+        - 불일치이고 연결 헤드셋이 0대 또는 2대 이상 → 에러 출력 후 즉시 종료
+
+        sdk/ 수정 금지 제약에 따라 오버라이드로 구현함.
+
+        Args:
+            result_dic: query headset 응답 리스트 (sdk 부모 메서드와 동일한 인수).
+        """
+        # 설정 headset_id가 비어 있으면 부모 자동 선택 로직 위임함
+        if not self.headset_id:
+            super()._handle_query_headset(result_dic)
+            return
+
+        headset_ids = [ele["id"] for ele in result_dic]
+
+        # 설정 ID가 이미 목록에 있으면 기존 동작 그대로 진행함 (backward-compat)
+        if self.headset_id in headset_ids:
+            super()._handle_query_headset(result_dic)
+            return
+
+        # 설정 ID가 목록에 없음 — 폴백 분기 진입함
+        if len(headset_ids) == 1:
+            fallback_id = headset_ids[0]
+            print(
+                f"[WARN] 설정 헤드셋 ID '{self.headset_id}' 미발견 — "
+                f"연결된 헤드셋 '{fallback_id}' 으로 폴백함 "
+                f"(subject {self.subject_index})"
+            )
+            self.headset_id = fallback_id
+            super()._handle_query_headset(result_dic)
+        elif len(headset_ids) == 0:
+            print(
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
+                f"연결된 헤드셋 없음 — 측정 불가. 종료함 (subject {self.subject_index})"
+            )
+            self.close()
+        else:
+            print(
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
+                f"연결된 헤드셋 {len(headset_ids)}대 ({headset_ids}) — "
+                f"자동 선택 불가. 종료함 (subject {self.subject_index})"
+            )
+            self.close()
+
     def on_new_data_labels(self, *args, **kwargs):
         """MET 점수 및 EEG 채널 인덱스를 동적으로 매핑함"""
         data = kwargs.get("data")
