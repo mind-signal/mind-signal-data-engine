@@ -195,7 +195,7 @@ test(analyzer): cover empty CSV edge case
 **Co-authored-by 의무** (`gwonseok02@gmail.com` 고정, `noreply` 금지, Claude Co-Authored-By 추가 금지):
 
 ```
-Co-authored-by: gs07103 <gwonseok02@gmail.com>
+Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 ```
 
 상세: `.agents/rules/commit-conventions.md`.

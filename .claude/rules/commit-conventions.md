@@ -26,11 +26,11 @@ pytest                # 단위 테스트 (필요 시 tests/ 디렉토리)
 모든 커밋 메시지 마지막에 아래 형식으로 고정 작성한다.
 
 ```
-Co-authored-by: gs07103 <gwonseok02@gmail.com>
+Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 ```
 
 - **이메일**: `gwonseok02@gmail.com` 고정 (`noreply` 주소 사용 금지)
-- Claude Co-Authored-By 추가 금지 — `gs07103` 단독으로만
+- Claude Co-Authored-By 추가 금지 — `KWONSEOK02` 단독으로만
 
 ---
 
