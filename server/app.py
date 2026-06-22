@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
     app.state.secret_key = settings.engine_secret_key
     app.state.registered_group_id = None
     app.state.heartbeat_task = None  # 분기 2는 미생성 → shutdown 가드용
+    app.state.proxy_heartbeat_task = None  # proxy 모드 재등록 태스크 → shutdown 가드용
     app.state.assign_lock = asyncio.Lock()
     app.state.pending_registered = (
         False  # 분기 2 retry 결과 — shutdown unregister 가드용
@@ -122,6 +123,47 @@ async def lifespan(app: FastAPI):
                     "[WARN] proxy registration 3회 실패함. DE 계속 실행, "
                     "proxy 기동 후 재등록 대기."
                 )
+
+            # proxy TTL 만료 전 주기적 재등록 태스크 시작함 (등록 성공 여부 무관하게 시작)
+            # — 최초 등록 실패 시에도 루프 안에서 재시도하여 복구 가능함
+            async def _proxy_reregister_loop(
+                _proxy_url: str,
+                _subject_index: int,
+                _public_url: str,
+                _secret_key: str,
+                _interval_sec: int,
+            ) -> None:
+                """proxy 등록 TTL 만료 전 주기적으로 register_to_proxy 재호출함.
+
+                Args:
+                    _proxy_url: 프록시 서버 베이스 URL.
+                    _subject_index: 피실험자 인덱스.
+                    _public_url: 등록할 DE 퍼블릭 URL.
+                    _secret_key: 공유 시크릿.
+                    _interval_sec: 재등록 주기(초).
+                """
+                while True:
+                    await asyncio.sleep(_interval_sec)
+                    try:
+                        await register_to_proxy(
+                            _proxy_url,
+                            _subject_index,
+                            _public_url,
+                            _secret_key,
+                        )
+                    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                        # 일시적 오류 — 루프 유지하며 다음 주기에 재시도함
+                        print(f"[WARN] proxy 재등록 실패 (non-fatal): {e}")
+
+            app.state.proxy_heartbeat_task = asyncio.create_task(
+                _proxy_reregister_loop(
+                    settings.proxy_url,
+                    settings.dual_2pc_subject_index,
+                    public_url,
+                    settings.engine_secret_key,
+                    settings.proxy_reregister_interval_sec,
+                )
+            )
     else:
         # be 모드 (default): 기존 동작 100% 보존
         try:
@@ -193,6 +235,10 @@ async def lifespan(app: FastAPI):
     # heartbeat_task 가드 (분기 2는 None 가능)
     if app.state.heartbeat_task is not None:
         app.state.heartbeat_task.cancel()
+
+    # proxy 재등록 태스크 취소함 (proxy 모드가 아닌 경우 None)
+    if app.state.proxy_heartbeat_task is not None:
+        app.state.proxy_heartbeat_task.cancel()
 
     # Phase 17.6 LD-26: pending entry 삭제 호출함 (DE shutdown 시 soft-fail)
     if (

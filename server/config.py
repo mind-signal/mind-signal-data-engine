@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Proxy 연동 (engine-proxy-sync Phase 18)
     proxy_url: str | None = None  # env PROXY_URL
     alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+    proxy_reregister_interval_sec: int = (
+        20  # env PROXY_REREGISTER_INTERVAL_SEC — TTL 만료 전 재등록 주기(초)
+    )
 
     # Emotiv
     client_id: str = ""
