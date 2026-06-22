@@ -4,13 +4,19 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # 엔진 루트 디렉토리 (stream.py → server/services/ → server/ → engine root)
 _ENGINE_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
+# core.main 자식 로그 디렉토리 (D7: stdout/stderr를 PIPE 대신 파일로 redirect함)
+_LOG_DIR = Path(_ENGINE_ROOT) / "logs"
+
 # 실행 중인 스트리밍 프로세스 추적 dict — key: "{group_id}:{subject_index}"
 _processes: dict[str, subprocess.Popen] = {}
+
+# 자식 프로세스별 로그 파일 핸들 추적 dict — 자식 수명 동안 열어둠 (D7)
+_log_files: dict[str, IO[str]] = {}
 
 
 def _make_key(group_id: str, subject_index: int) -> str:
@@ -18,8 +24,22 @@ def _make_key(group_id: str, subject_index: int) -> str:
     return f"{group_id}:{subject_index}"
 
 
+def _close_log(key: str) -> None:
+    """key에 연결된 로그 파일 핸들 닫고 정리함 (멱등)"""
+    handle = _log_files.pop(key, None)
+    if handle is not None:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
 def start_stream(group_id: str, subject_index: int) -> dict[str, Any]:
-    """core.main을 자식 프로세스로 spawn하여 EEG 스트리밍 시작함"""
+    """core.main을 자식 프로세스로 spawn하여 EEG 스트리밍 시작함
+
+    D7: 자식 stdout/stderr를 `logs/core_{group}_{subject}.log` 파일로 redirect함.
+    PIPE 미독취로 인한 버퍼 데드락 및 원격/멀티PC 에러 불가시성 해소함.
+    """
     key = _make_key(group_id, subject_index)
 
     # 이미 실행 중인 프로세스 확인함
@@ -27,19 +47,32 @@ def start_stream(group_id: str, subject_index: int) -> dict[str, Any]:
         proc = _processes[key]
         if proc.poll() is None:
             raise RuntimeError(f"스트림이 이미 실행 중임: {key} (PID {proc.pid})")
-        # 이미 종료된 프로세스는 정리함
+        # 이미 종료된 프로세스는 정리함 (로그 핸들 포함)
         del _processes[key]
+        _close_log(key)
 
+    # 로그 파일 준비함 — 디렉토리 보장 후 덮어쓰기 모드로 open함
+    _LOG_DIR.mkdir(exist_ok=True)
+    log_path = _LOG_DIR / f"core_{group_id}_{subject_index}.log"
+    log_file = open(log_path, "w", encoding="utf-8")
+
+    # python -u 로 자식 출력 버퍼링 제거 → 실시간 로그 확보함 (D7)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "core.main", group_id, str(subject_index)],
+        [sys.executable, "-u", "-m", "core.main", group_id, str(subject_index)],
         env=os.environ.copy(),
         cwd=_ENGINE_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
     )
 
     _processes[key] = proc
-    return {"status": "started", "pid": proc.pid, "key": key}
+    _log_files[key] = log_file
+    return {
+        "status": "started",
+        "pid": proc.pid,
+        "key": key,
+        "log": str(log_path),
+    }
 
 
 def stop_stream(group_id: str, subject_index: int) -> dict[str, Any]:
@@ -59,6 +92,7 @@ def stop_stream(group_id: str, subject_index: int) -> dict[str, Any]:
             proc.kill()
 
     del _processes[key]
+    _close_log(key)
     return {"status": "stopped", "key": key}
 
 
@@ -77,8 +111,9 @@ def get_all_status() -> list[dict[str, Any]]:
 
         result.append(entry)
 
-    # 종료된 프로세스 자동 정리함
+    # 종료된 프로세스 자동 정리함 (로그 핸들 포함)
     for key in finished_keys:
         del _processes[key]
+        _close_log(key)
 
     return result
