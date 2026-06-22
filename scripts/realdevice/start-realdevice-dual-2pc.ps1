@@ -212,8 +212,10 @@ Write-Host ""
 $env:LAN_IP = $OperatorIp
 $env:PROXY_URL = "http://${OperatorIp}:$ProxyPort"
 $env:BACKEND_URL = "http://localhost:$BackendPort"
+# DUAL_2PC subject 1 — be-mode pending 등록 트리거함. ALIGNMENT_LOCATION 미설정(기본 be) + DUAL_2PC_GROUP_ID 미설정이라 app.py 분기 2(pending) 진입 → register_to_backend_pending 으로 subject 1 BE pendingRegistry 등록. 누락 시 분기 3 SEQUENTIAL 로 빠져 DUAL_2PC 측정 503 발생함 (Phase 18.4 fix)
+$env:DUAL_2PC_SUBJECT_INDEX = "1"
 if ($Production) { $env:UVICORN_RELOAD = 'false' }
-Write-Step "4/9" "Data Engine A (port $DePort)"
+Write-Step "4/9" "Data Engine A (port $DePort, subject_index=1 pending)"
 if (Test-PortInUse -Port $DePort) {
     Write-Warn2 ("Port " + $DePort + " already in use. Assuming DE_A already running.")
 } else {
@@ -244,7 +246,11 @@ if ($SkipProxy) {
     Write-OK ("Port " + $ProxyPort + " already listening. Assuming proxy already running.")
 } else {
     $proxyDir = Join-Path $ProjectRoot "mind-signal-proxy"
-    # ENGINE_SECRET_KEY, BACKEND_URL 은 BE 단계에서 이미 $env: set 됨. PROXY_PORT 만 추가.
+    # ENGINE_SECRET_KEY 는 step 2, BACKEND_URL 은 step 4 에서 $env: set 됨.
+    # D1 방어: proxy beNotifier 는 config.BACKEND_URL 빈값이면 BE pending 미러 전체 무동작함
+    # (mind-signal-proxy/src/index.ts L85 가드) → proxy-mode assign-group 트리거 불발.
+    # cmd /k 자식 env 누락 가능성 차단 위해 proxy 기동 직전 명시 재설정함.
+    $env:BACKEND_URL = "http://localhost:$BackendPort"
     $env:PROXY_PORT = "$ProxyPort"
     $proxyArgs = "/k cd /d `"$proxyDir`" && npm start"
     Start-Process -FilePath "cmd.exe" -ArgumentList $proxyArgs -WindowStyle Normal
