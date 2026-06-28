@@ -32,6 +32,17 @@ def main():
     # subject_index에 매핑된 헤드셋 ID 조회함 (미설정 시 SDK 자동 선택)
     headset_id = os.getenv(f"HEADSET_ID_{subject_index}", "")
 
+    # proxy 연동 설정 로드함 (ALIGNMENT_LOCATION=proxy 시 proxy 모드 활성화)
+    alignment_location = os.getenv("ALIGNMENT_LOCATION", "be")
+    proxy_url = os.getenv("PROXY_URL")
+    engine_secret_key = os.getenv("ENGINE_SECRET_KEY", "")
+    max_proxy_post_retries_raw = os.getenv("MAX_PROXY_POST_RETRIES", "2")
+    max_proxy_post_retries = int(max_proxy_post_retries_raw)
+    proxy_health_poll_interval_sec = (
+        int(os.getenv("PROXY_HEALTH_POLL_INTERVAL_MS", "1000")) / 1000.0
+    )
+    proxy_fail_closed_threshold_ms = int(os.getenv("FAIL_CLOSED_THRESHOLD_MS", "3000"))
+
     print(f"Mind Signal Engine 구동 시작함 (Group: {group_id}, Index: {subject_index})")
     if headset_id:
         print(f"지정 헤드셋: {headset_id}")
@@ -43,7 +54,17 @@ def main():
 
     # 스트리머 인스턴스 생성 및 실행 수행함
     streamer = MindSignalStreamer(
-        group_id, subject_index, client_id, client_secret, headset_id=headset_id
+        group_id,
+        subject_index,
+        client_id,
+        client_secret,
+        headset_id=headset_id,
+        alignment_location=alignment_location,
+        proxy_url=proxy_url,
+        engine_secret_key=engine_secret_key,
+        max_proxy_post_retries=max_proxy_post_retries,
+        proxy_health_poll_interval_sec=proxy_health_poll_interval_sec,
+        proxy_fail_closed_threshold_ms=proxy_fail_closed_threshold_ms,
     )
     streamer.open()
 

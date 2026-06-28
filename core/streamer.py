@@ -16,6 +16,12 @@ from redis.retry import Retry
 
 from core.analyzer import MindSignalAnalyzer
 from sdk.cortex import Cortex
+from server.services.proxy_client import (
+    ProxyForwardError,
+    ProxyHealthTracker,
+    check_health,
+    post_sample,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +31,20 @@ class MindSignalStreamer(Cortex):
     [Engine] EEG 시계열 버퍼링 및 분석을 통해 실시간 데이터를 발행하는 스트리머임
     """
 
-    def __init__(self, group_id, subject_index, *args, headset_id="", **kwargs):
+    def __init__(
+        self,
+        group_id,
+        subject_index,
+        *args,
+        headset_id="",
+        alignment_location: str = "be",
+        proxy_url: str | None = None,
+        engine_secret_key: str = "",
+        max_proxy_post_retries: int = 2,
+        proxy_health_poll_interval_sec: float = 1.0,
+        proxy_fail_closed_threshold_ms: int = 3000,
+        **kwargs,
+    ):
         if headset_id:
             kwargs["headset_id"] = headset_id
         super().__init__(*args, **kwargs)
@@ -40,6 +59,20 @@ class MindSignalStreamer(Cortex):
 
         self.duration_min = int(os.getenv("EXPERIMENT_DURATION_MINUTES", 10))
         self.duration_sec = self.duration_min * 60
+
+        # proxy 연동 설정 저장함 (alignment_location="proxy" 시 proxy 모드 활성화)
+        self.alignment_location = alignment_location
+        self.proxy_url = proxy_url
+        self.engine_secret_key = engine_secret_key
+        self.max_proxy_post_retries = max_proxy_post_retries
+        self.proxy_health_poll_interval_sec = proxy_health_poll_interval_sec
+        self.proxy_fail_closed_threshold_ms = proxy_fail_closed_threshold_ms
+
+        # 엔진 단위 단조 증가 시퀀스 카운터 초기화함 (proxy 모드 전용)
+        self.seq = 0
+
+        # fail-closed 중복 발동 방지 플래그 초기화함
+        self._fail_closed_triggered = False
 
         # 2. Redis 채널 설정 및 연결 수행함 (REDIS_URL 우선, 없으면 HOST/PORT 폴백)
         self.channel = f"mind-signal:{self.group_id}:subject:{self.subject_index}"
@@ -118,6 +151,55 @@ class MindSignalStreamer(Cortex):
         print(f"스트리밍 채널 활성화됨: {self.channel}")
         print(f"데이터 저장 경로: {self.csv_path}")
 
+    def _handle_query_headset(self, result_dic):
+        """헤드셋 ID 불일치 시 단일 연결 헤드셋으로 폴백 수행함 (D6).
+
+        sdk/cortex.py 의 동명 메서드를 오버라이드함. 다음 세 가지 경우를 처리함:
+        - 설정 ID와 연결 헤드셋 ID가 일치 → 부모 메서드 위임 (기존 동작 보존)
+        - 불일치이고 연결 헤드셋이 정확히 1대 → 해당 헤드셋으로 폴백 후 부모 위임
+        - 불일치이고 연결 헤드셋이 0대 또는 2대 이상 → 에러 출력 후 즉시 종료
+
+        sdk/ 수정 금지 제약에 따라 오버라이드로 구현함.
+
+        Args:
+            result_dic: query headset 응답 리스트 (sdk 부모 메서드와 동일한 인수).
+        """
+        # 설정 headset_id가 비어 있으면 부모 자동 선택 로직 위임함
+        if not self.headset_id:
+            super()._handle_query_headset(result_dic)
+            return
+
+        headset_ids = [ele["id"] for ele in result_dic]
+
+        # 설정 ID가 이미 목록에 있으면 기존 동작 그대로 진행함 (backward-compat)
+        if self.headset_id in headset_ids:
+            super()._handle_query_headset(result_dic)
+            return
+
+        # 설정 ID가 목록에 없음 — 폴백 분기 진입함
+        if len(headset_ids) == 1:
+            fallback_id = headset_ids[0]
+            print(
+                f"[WARN] 설정 헤드셋 ID '{self.headset_id}' 미발견 — "
+                f"연결된 헤드셋 '{fallback_id}' 으로 폴백함 "
+                f"(subject {self.subject_index})"
+            )
+            self.headset_id = fallback_id
+            super()._handle_query_headset(result_dic)
+        elif len(headset_ids) == 0:
+            print(
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
+                f"연결된 헤드셋 없음 — 측정 불가. 종료함 (subject {self.subject_index})"
+            )
+            self.close()
+        else:
+            print(
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
+                f"연결된 헤드셋 {len(headset_ids)}대 ({headset_ids}) — "
+                f"자동 선택 불가. 종료함 (subject {self.subject_index})"
+            )
+            self.close()
+
     def on_new_data_labels(self, *args, **kwargs):
         """MET 점수 및 EEG 채널 인덱스를 동적으로 매핑함"""
         data = kwargs.get("data")
@@ -156,7 +238,37 @@ class MindSignalStreamer(Cortex):
         self._watchdog_active = True
         self._start_watchdog()
 
+        # proxy 모드 시 health 폴링 데몬 시작함
+        if self.alignment_location == "proxy":
+            self._start_proxy_health_monitor()
+
         self.sub_request(["eeg", "met"])
+
+    def _start_proxy_health_monitor(self):
+        """proxy /health 폴링으로 fail-closed 감지 시 측정 중단 수행하는 데몬 스레드 시작함"""
+        tracker = ProxyHealthTracker(self.proxy_fail_closed_threshold_ms)
+
+        def _check():
+            while self._watchdog_active:
+                healthy = check_health(self.proxy_url)
+                tripped = tracker.record(healthy, time.monotonic())
+                if tripped and not self._fail_closed_triggered:
+                    self._fail_closed_triggered = True
+                    print(
+                        "[FAIL_CLOSED] proxy /health fail-closed 지속"
+                        f" — 측정 중단함 (subject {self.subject_index})"
+                    )
+                    try:
+                        self.close_session()
+                    except Exception as e:
+                        logger.warning(f"close_session 실패 (무시): {e}")
+                    finally:
+                        self.close()
+                    break
+                time.sleep(self.proxy_health_poll_interval_sec)
+
+        t = threading.Thread(target=_check, daemon=True)
+        t.start()
 
     def _start_watchdog(self):
         """무데이터 감지 watchdog 스레드 시작함"""
@@ -262,19 +374,50 @@ class MindSignalStreamer(Cortex):
             )
             self.csv_file.flush()
 
-            # 2. Redis 실시간 발행 수행함
-            payload = {
-                "type": "brain_sync_all",
-                "groupId": self.group_id,
-                "subjectIndex": self.subject_index,
-                "waves": powers,
-                "metrics": self.latest_met,
-                "time": formatted_time,
-            }
-            try:
-                self.r.publish(self.channel, json.dumps(payload))
-            except (ConnectionError, TimeoutError, ConnectionResetError) as e:
-                logger.warning(f"Redis publish 실패 (CSV 저장은 계속): {e}")
+            # 2. alignment_location에 따라 proxy 또는 Redis로 샘플 발행함
+            if self.alignment_location == "proxy":
+                # proxy 모드 — 시퀀스 증가 후 HTTP로 포워딩함
+                self.seq += 1
+                try:
+                    post_sample(
+                        proxy_url=self.proxy_url,
+                        secret_key=self.engine_secret_key,
+                        group_id=self.group_id,
+                        subject_idx=self.subject_index,
+                        seq=self.seq,
+                        payload=powers,
+                        sync_meta={"de_clock_domain": "monotonic_ns"},
+                        max_retries=self.max_proxy_post_retries,
+                    )
+                except ProxyForwardError:
+                    # retry 소진 — FAIL_CLOSED: 측정 즉시 중단함 (중복 발동 방지)
+                    if not self._fail_closed_triggered:
+                        self._fail_closed_triggered = True
+                        print(
+                            "[FAIL_CLOSED] proxy 전송 retry 소진 — 측정 중단함"
+                            f" (subject {self.subject_index})"
+                        )
+                        try:
+                            self.close_session()
+                        except Exception as e:
+                            logger.warning(f"close_session 실패 (무시): {e}")
+                        finally:
+                            self.close()
+                    return
+            else:
+                # be 모드 (기본) — Redis pub/sub 발행함 (byte-identical 유지)
+                payload = {
+                    "type": "brain_sync_all",
+                    "groupId": self.group_id,
+                    "subjectIndex": self.subject_index,
+                    "waves": powers,
+                    "metrics": self.latest_met,
+                    "time": formatted_time,
+                }
+                try:
+                    self.r.publish(self.channel, json.dumps(payload))
+                except (ConnectionError, TimeoutError, ConnectionResetError) as e:
+                    logger.warning(f"Redis publish 실패 (CSV 저장은 계속): {e}")
 
             # 분석 완료 후 버퍼 초기화함 (비오버랩 방식)
             self.eeg_buffer = []

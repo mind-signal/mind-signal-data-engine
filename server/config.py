@@ -19,27 +19,12 @@ class Settings(BaseSettings):
     dual_2pc_subject_index: int | None = None
     lan_ip: str | None = None  # LAN IP override (없으면 socket 자동 탐지)
 
-    # Emotiv
-    client_id: str = ""
-    client_secret: str = ""
-
-    # Redis
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-
-    # 실험
-    experiment_duration_minutes: int = 10
-
-    # 분석 파이프라인 파라미터
-    stimulus_duration_sec: int = 60  # 1개 자극의 총 시간 (초)
-    window_size_sec: int = 10  # 시간 분할 단위 (초)
-    n_stimuli: int = 10  # 전체 자극 수
-    n_bands: int = 4  # 사용할 뇌파 대역 수
-    baseline_duration_sec: int = 30  # baseline 구간 길이 (초)
-    band_cols: list[str] = ["alpha", "beta", "theta", "gamma"]  # 사용할 대역
-
-    # ngrok (REGISTRATION_MODE=ngrok 때만 필요)
-    ngrok_auth_token: str | None = None
+    # Proxy 연동 (engine-proxy-sync Phase 18)
+    proxy_url: str | None = None  # env PROXY_URL
+    alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+    proxy_reregister_interval_sec: int = (
+        20  # env PROXY_REREGISTER_INTERVAL_SEC — TTL 만료 전 재등록 주기(초)
+    )
 
     class Config:
         env_file = ".env.local"

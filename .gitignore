@@ -66,3 +66,6 @@ desktop.ini
 # Project planning (local only)
 .plans/
 context/
+
+# 로컬 머신 종속 스크립트 (절대경로 포함)
+_start-de-test.bat
