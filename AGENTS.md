@@ -76,6 +76,10 @@ ENGINE_SECRET_KEY=<shared_secret>
 
 Redis 채널은 `core.main`의 인수(groupId, subjectIndex)로 동적 결정 — 환경변수 불필요.
 
+### Cortex TLS 인증서 — `certificates/rootCA.pem` 로컬 필수
+
+`sdk/cortex.py`가 Cortex wss 연결의 TLS CA로 레포 루트의 `certificates/rootCA.pem`을 읽음. 이 파일은 gitignore라 git에 안 올라오므로 **새 머신마다 로컬에 직접 둬야 함**. 누락 시 `core.main`이 `SSL CA certificate loading failed: [Errno 2] No such file or directory` 출력 후 0.0초 만에 returncode 0으로 종료함(헤드셋은 정상 발견돼도 측정 0초). 기존 Emotiv 설치 경로의 인증서를 복사해 채움. 2026-06-28 노트북 B 라이브 연결 검증 중 D8(즉시종료) 근본 원인으로 확인됨.
+
 ### Phase migration 환경변수 cleanup 룰
 
 Phase migration 진행 시 `.env.local` 또는 `.env.example`에 박제된 환경변수 중 이전 Phase 전용으로 남아 있는 값은 cleanup 의무. 5/26 D-0 시연 setup 도중 노출된 사례:
