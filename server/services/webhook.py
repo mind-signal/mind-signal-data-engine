@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import httpx
 
@@ -160,3 +161,47 @@ async def start_heartbeat_dual(
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             # heartbeat transient error 허용함 (log-and-continue)
             print(f"dual heartbeat register failed (non-fatal): {e}")
+
+
+def upload_csv_to_backend(
+    backend_url: str,
+    csv_path: str,
+    secret_key: str,
+    timeout: float = 10.0,
+) -> bool:
+    """측정 종료 시 subject CSV를 operator BE로 업로드함 (2-PC 집계). soft-fail.
+
+    원본 CSV는 각 노트북에 분산 유지하고 분석용 사본만 operator로 전송함.
+    실패해도 raise 안 함 — 측정 종료 흐름을 깨지 않기 위함. streamer가 sync 컨텍스트라
+    sync httpx.Client 사용함.
+
+    Args:
+        backend_url: operator BE 베이스 URL.
+        csv_path: 업로드할 로컬 CSV 절대경로.
+        secret_key: X-Engine-Secret 헤더 공유 시크릿.
+        timeout: HTTP 타임아웃 초.
+
+    Returns:
+        업로드 성공 여부 반환.
+    """
+    filename = os.path.basename(csv_path)
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{backend_url}/api/engine/csv-upload",
+                params={"filename": filename},
+                headers={
+                    "X-Engine-Secret": secret_key,
+                    "Content-Type": "text/csv",
+                },
+                content=content.encode("utf-8"),
+            )
+            response.raise_for_status()
+        print(f"[csv-upload] {filename} 업로드 완료")
+        return True
+    except (httpx.HTTPError, OSError) as e:
+        # soft-fail: 측정 종료 흐름 보호 — raise 금지
+        print(f"[WARN] csv-upload failed (soft): {e}")
+        return False

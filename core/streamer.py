@@ -16,12 +16,14 @@ from redis.retry import Retry
 
 from core.analyzer import MindSignalAnalyzer
 from sdk.cortex import Cortex
+from server.config import settings
 from server.services.proxy_client import (
     ProxyForwardError,
     ProxyHealthTracker,
     check_health,
     post_sample,
 )
+from server.services.webhook import upload_csv_to_backend
 
 logger = logging.getLogger(__name__)
 
@@ -461,4 +463,10 @@ class MindSignalStreamer(Cortex):
         elapsed = time.time() - self.start_time if hasattr(self, "start_time") else 0
         if hasattr(self, "csv_file") and not self.csv_file.closed:
             self.csv_file.close()
+        # 2-PC 집계 — CSV 닫힌 직후 operator BE로 사본 업로드함 (soft-fail).
+        # 양쪽 DE가 업로드해도 operator 자기 사본은 멱등 overwrite라 무해함.
+        if getattr(self, "csv_path", None):
+            upload_csv_to_backend(
+                settings.backend_url, self.csv_path, self.engine_secret_key
+            )
         print(f"프로그램이 안전하게 종료되었음. (총 측정 시간: {elapsed:.1f}초)")
