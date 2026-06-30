@@ -304,6 +304,7 @@ Write-Host ""
 Write-Host "=== All services healthy ===" -ForegroundColor Green
 
 # 상태 대시보드 자동 오픈 (BE static)
-Write-Host "  상태 대시보드: http://localhost:5000/dashboard.html" -ForegroundColor Cyan
-Start-Process "http://localhost:5000/dashboard.html"
+$dashboardUrl = "http://localhost:$BackendPort/dashboard.html"
+Write-Host ("  상태 대시보드: " + $dashboardUrl) -ForegroundColor Cyan
+Start-Process $dashboardUrl
 Write-Host ""

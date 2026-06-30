@@ -303,6 +303,7 @@ Write-Host ""
 Write-Host "=== Notebook B DE_B healthy ===" -ForegroundColor Green
 
 # operator 상태 대시보드 오픈 (Tailscale 경유, OperatorIp는 IP 또는 MagicDNS 호스트명)
-Write-Host ("  상태 대시보드: http://" + $OperatorIp + ":5000/dashboard.html") -ForegroundColor Cyan
-Start-Process ("http://" + $OperatorIp + ":5000/dashboard.html")
+$dashboardUrl = "http://" + $OperatorIp + ":" + $BackendPort + "/dashboard.html"
+Write-Host ("  상태 대시보드: " + $dashboardUrl) -ForegroundColor Cyan
+Start-Process $dashboardUrl
 Write-Host ""
