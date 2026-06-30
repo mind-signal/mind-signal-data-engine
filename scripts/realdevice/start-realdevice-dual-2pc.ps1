@@ -226,7 +226,8 @@ if (Test-PortInUse -Port $DePort) {
     Write-Warn2 ("Port " + $DePort + " already in use. Assuming DE_A already running.")
 } else {
     $deDir = Join-Path $ProjectRoot "mind-signal-data-engine"
-    $deCmd = "conda activate $CondaEnv && python run_server.py"
+    # 절대 conda python 경로로 직접 기동함 (cmd 자식에서 conda activate 미동작 사례 우회, AGENTS _start-de-test.bat 패턴).
+    $deCmd = "`"$condaPath\python.exe`" run_server.py"
     $deArgs = "/k cd /d `"$deDir`" && $deCmd"
     Start-Process -FilePath "cmd.exe" -ArgumentList $deArgs -WindowStyle Normal
     Write-OK "DE_A terminal launched (env inherited from PowerShell scope)"
