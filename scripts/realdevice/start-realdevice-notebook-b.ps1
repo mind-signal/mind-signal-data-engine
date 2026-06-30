@@ -2,10 +2,9 @@
 # DE_B 만 기동. BE/Proxy/Redis 는 operator PC 의존 (Tailscale 경유).
 # Idempotent. operator PC start-realdevice-dual-2pc.ps1 GREEN 이후 실행.
 #
-# Usage:
-#   powershell -ExecutionPolicy Bypass -File .\start-realdevice-notebook-b.ps1
-#   powershell -ExecutionPolicy Bypass -File .\start-realdevice-notebook-b.ps1 -OperatorIp 100.117.42.107
-#   powershell -ExecutionPolicy Bypass -File .\start-realdevice-notebook-b.ps1 -SubjectIndex 2 -Production
+# Usage: (-OperatorIp 기본값 operator = MagicDNS 고정 이름 → 보통 무인자 실행)
+#   powershell -File .\start-realdevice-notebook-b.ps1
+#   operator 머신이 바뀌면: powershell -File .\start-realdevice-notebook-b.ps1 -OperatorIp <그 머신 MagicDNS 이름>
 #
 # Stop: stop-realdevice-notebook-b.ps1
 #
@@ -16,8 +15,9 @@
 
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = "C:\Users\gs071\Team-project",
-    [string]$OperatorIp = "100.117.42.107",
+    [string]$ProjectRoot = "",
+    [string]$OperatorIp = "operator",  # MagicDNS 고정 이름. operator 머신이 바뀌면 그 이름으로 전달함
+
     [int]$BackendPort = 5000,
     [int]$DePort = 5002,
     [int]$ProxyPort = 5050,
@@ -79,6 +79,27 @@ function Test-TailscalePing {
         if ($output -match "^pong from") { return $true }
     } catch { }
     return $false
+}
+
+# Resolve ProjectRoot: 미지정 시 스크립트 위치에서 유도함.
+# 이 스크립트는 <Team-project>/mind-signal-data-engine/scripts/realdevice/ 에 위치하므로
+# 3단계 상위가 Team-project 루트임 (사용자 경로 하드코딩 제거, 머신 무관 동작).
+if (-not $ProjectRoot) {
+    $here = Split-Path -Parent $PSCommandPath
+    $ProjectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
+}
+
+# Resolve OperatorIp: 하드코딩 기본값 제거 — Tailscale IP는 재할당될 수 있어 고정값이면
+# 오류 없이 잘못된 피어로 연결을 시도한다. 미지정 시 peer 목록 안내 후 중단 (2026-06-10).
+if (-not $OperatorIp) {
+    Write-Fail "-OperatorIp 미지정. operator PC의 Tailscale IP를 명시하세요."
+    Write-Warn2 "예: powershell -ExecutionPolicy Bypass -File .\start-realdevice-notebook-b.ps1 -OperatorIp 100.117.42.107"
+    try {
+        Write-Host ""
+        Write-Host "  현재 tailnet peer 목록 (tailscale status):" -ForegroundColor Yellow
+        & "C:\Program Files\Tailscale\tailscale.exe" status 2>$null | ForEach-Object { Write-Host ("    " + $_) -ForegroundColor Gray }
+    } catch { }
+    exit 2
 }
 
 # 0. Pre-flight
@@ -280,4 +301,8 @@ Write-Host ("    2. DE_B 터미널의 'proxy registration' 로그 확인 (3 회 
 Write-Host ("    3. Operator PC FE 에서 measurement 시작 -> dual-2pc 흐름 검증") -ForegroundColor Gray
 Write-Host ""
 Write-Host "=== Notebook B DE_B healthy ===" -ForegroundColor Green
+
+# operator 상태 대시보드 오픈 (Tailscale 경유, OperatorIp는 IP 또는 MagicDNS 호스트명)
+Write-Host ("  상태 대시보드: http://" + $OperatorIp + ":5000/dashboard.html") -ForegroundColor Cyan
+Start-Process ("http://" + $OperatorIp + ":5000/dashboard.html")
 Write-Host ""
