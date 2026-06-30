@@ -227,7 +227,8 @@ Write-Step "2/7" ("Data Engine B (port " + $DePort + ", subject_index=" + $Subje
 if (Test-PortInUse -Port $DePort) {
     Write-Warn2 ("Port " + $DePort + " already in use. Assuming DE_B already running.")
 } else {
-    $deCmd = "conda activate $CondaEnv && python run_server.py"
+    # 절대 conda python 경로로 직접 기동함 (cmd 자식에서 conda activate 미동작 사례 우회, AGENTS _start-de-test.bat 패턴).
+    $deCmd = "`"$condaPath\python.exe`" run_server.py"
     $deArgs = "/k cd /d `"$deDir`" && $deCmd"
     Start-Process -FilePath "cmd.exe" -ArgumentList $deArgs -WindowStyle Normal
     Write-OK "DE_B terminal launched (env inherited from PowerShell scope)"
