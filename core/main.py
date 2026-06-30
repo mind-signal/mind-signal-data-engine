@@ -31,7 +31,7 @@ def main():
 
     # 동적 바인딩: 헤드셋 ID를 고정하지 않음. 빈 문자열을 넘기면 SDK가 이 PC에
     # 연결된 첫 헤드셋을 자동 선택해 subject_index 스트림으로 값을 주입함.
-    # 헤드셋 ID 하드코딩 제거 — 어떤 헤드셋이 붙어도 동작 (PC당 헤드셋 1대 전제).
+    # 헤드셋 ID 하드코딩 제거함. 어떤 헤드셋이 붙어도 동작함 (PC당 헤드셋 1대 전제).
     headset_id = ""
 
     # proxy 연동 설정 로드함 (ALIGNMENT_LOCATION=proxy 시 proxy 모드 활성화)
@@ -47,7 +47,7 @@ def main():
 
     print(f"Mind Signal Engine 구동 시작함 (Group: {group_id}, Index: {subject_index})")
     print(
-        f"[INFO] 헤드셋 동적 선택 — Cortex가 보고한 첫 헤드셋을 subject {subject_index}로 사용함"
+        f"[INFO] 헤드셋 동적 선택: Cortex가 보고한 첫 헤드셋을 subject {subject_index}로 사용함"
     )
 
     # 스트리머 인스턴스 생성 및 실행 수행함
