@@ -1,6 +1,16 @@
+import os
 from typing import Literal
 
+import certifi
 from pydantic_settings import BaseSettings
+
+# SSL_CERT_FILE이 존재하지 않는 경로를 가리키면 certifi 번들로 교정함.
+# conda base 활성화가 심는 stale 값(miniconda3/ssl/cacert.pem 부재)으로 httpx가
+# FileNotFoundError로 죽는 것을 방어함. config는 httpx 사용 모듈 대부분이 import하므로
+# 여기서 교정하면 런타임+테스트 전 경로에서 유효함.
+_ssl_cert = os.environ.get("SSL_CERT_FILE")
+if _ssl_cert and not os.path.exists(_ssl_cert):
+    os.environ["SSL_CERT_FILE"] = certifi.where()
 
 
 class Settings(BaseSettings):

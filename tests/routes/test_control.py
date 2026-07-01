@@ -143,20 +143,84 @@ def test_assign_group_concurrent_requests_serialized(
     assert len(requests) == 1
 
 
-def test_assign_group_different_group_returns_409(
+def test_assign_group_different_group_idle_rebinds_200(
     pending_app: FastAPI, httpx_mock: HTTPXMock
 ):
-    """X 등록됨 + Y 호출 → 409 group_id_conflict 확인함"""
+    """X 등록됨(측정중 아님) + Y 호출 → idle-rebind 200 + supersede 확인함 (Phase 19)"""
+    httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
     httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
     client = TestClient(pending_app)
 
     _assign(client, TEST_GROUP_ID)
     resp = _assign(client, ANOTHER_GROUP_ID)
 
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "registered"
+    assert body["groupId"] == ANOTHER_GROUP_ID
+    assert body["superseded"] == TEST_GROUP_ID
+    assert pending_app.state.registered_group_id == ANOTHER_GROUP_ID
+
+
+def test_assign_group_different_group_measuring_returns_409(
+    pending_app: FastAPI, httpx_mock: HTTPXMock, monkeypatch
+):
+    """X 등록됨 + 측정중 + Y 호출 → 409 group_id_conflict(라이브 보호) 확인함 (Phase 19)"""
+    httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
+    client = TestClient(pending_app)
+
+    _assign(client, TEST_GROUP_ID)
+
+    # TEST_GROUP_ID로 실행 중인 스트림 존재하도록 mock함 (측정중 판정)
+    monkeypatch.setattr(
+        control,
+        "get_all_status",
+        lambda: [{"key": f"{TEST_GROUP_ID}:1", "pid": 1, "running": True}],
+    )
+    resp = _assign(client, ANOTHER_GROUP_ID)
+
     assert resp.status_code == 409
     body = resp.json()
     assert body["detail"]["error"] == "group_id_conflict"
     assert body["detail"]["current"] == TEST_GROUP_ID
+    assert body["detail"]["reason"] == "measuring"
+
+
+def test_release_clears_binding(pending_app: FastAPI, httpx_mock: HTTPXMock):
+    """register 후 release → 바인딩 해제 + released=true 확인함 (Phase 19)"""
+    httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
+    client = TestClient(pending_app)
+
+    _assign(client, TEST_GROUP_ID)
+    resp = client.post(
+        "/control/release", json={}, headers={"X-Engine-Secret": TEST_SECRET}
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["released"] is True
+    assert body["previous"] == TEST_GROUP_ID
+    assert pending_app.state.registered_group_id is None
+
+
+def test_release_bad_secret_returns_401(pending_app: FastAPI):
+    """release secret mismatch → 401 확인함 (Phase 19)"""
+    client = TestClient(pending_app)
+    resp = client.post(
+        "/control/release", json={}, headers={"X-Engine-Secret": "wrong"}
+    )
+    assert resp.status_code == 401
+
+
+def test_release_empty_group_id_returns_422(pending_app: FastAPI):
+    """release group_id 빈 문자열 → 422 (부분 teardown 방지, CodeRabbit)"""
+    client = TestClient(pending_app)
+    resp = client.post(
+        "/control/release",
+        json={"group_id": ""},
+        headers={"X-Engine-Secret": TEST_SECRET},
+    )
+    assert resp.status_code == 422
 
 
 def test_assign_group_invalid_body_returns_422(pending_app: FastAPI):
