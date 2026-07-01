@@ -60,6 +60,33 @@ def _detect_tailscale_ip() -> str | None:
     return None
 
 
+def _resolve_advertise_ip(explicit: str | None) -> str:
+    """DE가 proxy에 광고할 IP 결정함.
+
+    우선순위: 명시 LAN_IP(Tailscale 대역일 때만) > Tailscale 대역 자동탐지 >
+    socket 폴백. Tailscale이 유일 transport라 명시 LAN_IP가 대역 밖(스테일
+    LAN/Wi-Fi 주소)이면 무시하고 자동탐지로 내려 cross-machine 도달 실패를
+    self-heal함 (하드 실패 대신 경고 — 라이브 중단 방지).
+
+    Args:
+        explicit: LAN_IP env 값 (없으면 None).
+
+    Returns:
+        광고할 IPv4 문자열.
+    """
+    if explicit:
+        try:
+            if ipaddress.ip_address(explicit) in _TAILSCALE_NET:
+                return explicit
+        except ValueError:
+            pass
+        print(
+            f"[WARN] LAN_IP={explicit} 이(가) Tailscale 대역(100.64.0.0/10) 밖 — "
+            "무시하고 자동탐지로 대체함 (cross-machine 도달 보장)"
+        )
+    return _detect_tailscale_ip() or socket.gethostbyname(socket.gethostname())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """서버 시작 시 URL 결정 + 백엔드 등록(모드별 분기) + heartbeat 수행함.
@@ -93,15 +120,7 @@ async def lifespan(app: FastAPI):
         public_url = tunnel.public_url
         print(f"ngrok 퍼블릭 URL 발급됨: {public_url}", flush=True)
     else:  # local
-        # 우선순위: 명시 LAN_IP(런처가 `tailscale ip -4`로 주입, 또는 수동 override)
-        # > Tailscale 대역 자동탐지 > socket 폴백. Tailscale이 유일 transport라
-        # LAN_IP 미주입 시에도 Tailscale IP를 광고해 cross-machine 도달 보장함
-        # (socket.gethostbyname이 Docker/WSL/Wi-Fi 어댑터 오선택하는 결함 방어).
-        lan_ip = (
-            settings.lan_ip
-            or _detect_tailscale_ip()
-            or socket.gethostbyname(socket.gethostname())
-        )
+        lan_ip = _resolve_advertise_ip(settings.lan_ip)
         public_url = f"http://{lan_ip}:{settings.fastapi_port}"
         print(f"[INFO] DE advertise URL: {public_url}")
 
