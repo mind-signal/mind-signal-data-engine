@@ -28,6 +28,7 @@ class ReleaseRequest(BaseModel):
 
     group_id: str | None = Field(
         None,
+        min_length=1,
         description="해제 대상 groupId. 미지정 시 현재 바인딩 무조건 해제함 (비상 전체해제)",
     )
 
@@ -52,9 +53,10 @@ def _stop_streams_for(group_id: str) -> list[str]:
         try:
             stop_stream(gid, int(sidx))
             stopped.append(key)
-        except (KeyError, ValueError):
-            # 이미 정리됐거나 key 파싱 실패 — 무시함
-            pass
+        except (KeyError, ValueError) as exc:
+            # 이미 정리됐거나 key 파싱 실패 — 비상 release는 나머지 스트림도 계속
+            # 정지해야 하므로 중단하지 않고 경고만 남김 (가시성 확보)
+            print(f"[WARN] release stream stop skipped for {key}: {exc}")
     return stopped
 
 
@@ -182,7 +184,7 @@ async def release_group(
 
     async with app.state.assign_lock:
         current = app.state.registered_group_id
-        target = body.group_id or current
+        target = current if body.group_id is None else body.group_id
 
         stopped: list[str] = []
         if target:

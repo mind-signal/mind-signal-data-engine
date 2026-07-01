@@ -212,6 +212,17 @@ def test_release_bad_secret_returns_401(pending_app: FastAPI):
     assert resp.status_code == 401
 
 
+def test_release_empty_group_id_returns_422(pending_app: FastAPI):
+    """release group_id 빈 문자열 → 422 (부분 teardown 방지, CodeRabbit)"""
+    client = TestClient(pending_app)
+    resp = client.post(
+        "/control/release",
+        json={"group_id": ""},
+        headers={"X-Engine-Secret": TEST_SECRET},
+    )
+    assert resp.status_code == 422
+
+
 def test_assign_group_invalid_body_returns_422(pending_app: FastAPI):
     """잘못된 body → FastAPI validation 422 확인함 (pydantic 기본)"""
     client = TestClient(pending_app)
