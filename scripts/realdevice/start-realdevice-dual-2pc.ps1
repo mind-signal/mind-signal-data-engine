@@ -12,7 +12,7 @@
 #
 # References:
 # - 2026-05-27 cross-machine Tailscale GREEN [[project_mind_signal_phase18_mcafee_removed_cross_machine_green]]
-# - mind-signal-d0-setup.ps1 (firewall + .env.local 갱신, 별도 책임)
+# - 핫스팟/D-0 셋업 스크립트는 Tailscale 대체로 아카이브됨 (99_archive/). 방화벽은 핫스팟 전용이라 Tailscale 후 무관
 # - [[feedback_start_process_conda_hook]] conda activate hook 안정성
 
 [CmdletBinding()]

@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import socket
 from contextlib import asynccontextmanager
 
@@ -30,6 +31,33 @@ PLACEHOLDER_SECRETS = {
     "change-me-in-production",
     "",
 }
+
+# Tailscale CGNAT 대역 — 2PC cross-machine 도달 경로는 Tailscale뿐이라
+# advertise IP는 반드시 이 대역이어야 함
+_TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _detect_tailscale_ip() -> str | None:
+    """이 머신의 Tailscale IP(100.64.0.0/10 대역) 자동 탐지함.
+
+    LAN_IP 미지정 시 socket.gethostbyname은 기본 어댑터(Docker/WSL/Wi-Fi)를
+    골라 operator가 도달 못 하는 주소를 광고하는 결함이 있어, Tailscale 대역
+    인터페이스를 우선 선택함.
+
+    Returns:
+        Tailscale IPv4 문자열, 없으면 None.
+    """
+    try:
+        _, _, ips = socket.gethostbyname_ex(socket.gethostname())
+    except OSError:
+        return None
+    for ip in ips:
+        try:
+            if ipaddress.ip_address(ip) in _TAILSCALE_NET:
+                return ip
+        except ValueError:
+            continue
+    return None
 
 
 @asynccontextmanager
@@ -65,8 +93,17 @@ async def lifespan(app: FastAPI):
         public_url = tunnel.public_url
         print(f"ngrok 퍼블릭 URL 발급됨: {public_url}", flush=True)
     else:  # local
-        lan_ip = settings.lan_ip or socket.gethostbyname(socket.gethostname())
+        # 우선순위: 명시 LAN_IP(런처가 `tailscale ip -4`로 주입, 또는 수동 override)
+        # > Tailscale 대역 자동탐지 > socket 폴백. Tailscale이 유일 transport라
+        # LAN_IP 미주입 시에도 Tailscale IP를 광고해 cross-machine 도달 보장함
+        # (socket.gethostbyname이 Docker/WSL/Wi-Fi 어댑터 오선택하는 결함 방어).
+        lan_ip = (
+            settings.lan_ip
+            or _detect_tailscale_ip()
+            or socket.gethostbyname(socket.gethostname())
+        )
         public_url = f"http://{lan_ip}:{settings.fastapi_port}"
+        print(f"[INFO] DE advertise URL: {public_url}")
 
     # app.state 초기화 (Phase 17.5) — 모든 분기 공통
     app.state.public_url = public_url
