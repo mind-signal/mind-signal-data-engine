@@ -46,8 +46,11 @@ def _upload_subject_csv(group_id: str, subject_index: int) -> None:
     from server.config import settings
     from server.services.webhook import upload_csv_to_backend
 
+    # group_id는 glob.escape로 감싸 *,?,[ 메타문자 오매칭 방지함 (CodeRabbit)
     pattern = os.path.join(
-        _ENGINE_ROOT, "csv", f"subject_{subject_index}_{group_id}_*.csv"
+        _ENGINE_ROOT,
+        "csv",
+        f"subject_{subject_index}_{glob.escape(group_id)}_*.csv",
     )
     matches = sorted(glob.glob(pattern), key=os.path.getmtime)
     if not matches:
