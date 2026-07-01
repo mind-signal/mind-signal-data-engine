@@ -1,5 +1,6 @@
 """EEG 스트리밍 프로세스 관리 서비스임"""
 
+import glob
 import os
 import subprocess
 import sys
@@ -32,6 +33,32 @@ def _close_log(key: str) -> None:
             handle.close()
         except OSError:
             pass
+
+
+def _upload_subject_csv(group_id: str, subject_index: int) -> None:
+    """종료된 subject의 CSV를 operator BE로 업로드함 (2-PC 집계).
+
+    Windows에서 proc.terminate()는 TerminateProcess(하드 킬)이라 core.main의
+    SIGTERM/on_close 업로드가 실행되지 않음. DE 서버가 종료 직후 직접 업로드해
+    수동 중지에도 subject CSV가 operator csv/에 집계되게 함. upload는 멱등 overwrite라
+    auto-stop의 on_close 업로드와 중복돼도 무해함.
+    """
+    from server.config import settings
+    from server.services.webhook import upload_csv_to_backend
+
+    # group_id는 glob.escape로 감싸 *,?,[ 메타문자 오매칭 방지함 (CodeRabbit)
+    pattern = os.path.join(
+        _ENGINE_ROOT,
+        "csv",
+        f"subject_{subject_index}_{glob.escape(group_id)}_*.csv",
+    )
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime)
+    if not matches:
+        print(f"[stop_stream] subject CSV 미발견, 업로드 skip: {pattern}")
+        return
+    upload_csv_to_backend(
+        settings.backend_url, matches[-1], settings.engine_secret_key
+    )
 
 
 def start_stream(group_id: str, subject_index: int) -> dict[str, Any]:
@@ -93,6 +120,11 @@ def stop_stream(group_id: str, subject_index: int) -> dict[str, Any]:
 
     del _processes[key]
     _close_log(key)
+    # Windows 하드킬로 core.main on_close 업로드가 스킵되므로 DE 서버가 직접 업로드함
+    try:
+        _upload_subject_csv(group_id, subject_index)
+    except Exception as e:  # noqa: BLE001 — 업로드 실패는 stop 흐름 안 깸(soft)
+        print(f"[stop_stream] CSV 업로드 오류(무시): {e}")
     return {"status": "stopped", "key": key}
 
 
