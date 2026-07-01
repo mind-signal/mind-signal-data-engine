@@ -86,7 +86,7 @@ Phase migration 진행 시 `.env.local` 또는 `.env.example`에 박제된 환�
 
 - Phase 17 `REGISTRATION_MODE=ngrok` 잔재 — Phase 18 proxy mode 환경에서 사용 시 `public_url`을 proxy `/register`로 보낼 때 ngrok URL 등록 risk 발생함. proxy mode 환경에선 `REGISTRATION_MODE=local` 의무함.
 - Phase 18 `ALIGNMENT_LOCATION` + `PROXY_URL` 신규 추가 — proxy mode 활성화 트리거. `.env.example`에 빈 값 default 박제로 proxy mode 미사용 시 자연 비활성화 정합함.
-- `LAN_IP` 운영자 명시 override 권장 — 5/26 D-0 학교 Wi-Fi 환경에서 `socket.gethostbyname` 자동 탐지가 다중 인터페이스(학교 Wi-Fi + 핫스팟 broadcast) 시 부정확 발견함. 분기 박제: operator PC = proxy 동일 머신 시 `127.0.0.1`, 노트북 B = DE_B 별개 머신 시 핫스팟 어댑터 IPv4.
+- `LAN_IP` — DE가 proxy에 광고할 자기 IP. **Tailscale이 유일 transport로 pivot**(2026-06-30, 핫스팟/D-0 스크립트 아카이브)한 뒤로는 보통 비워둠. 해석 우선순위: 명시 `LAN_IP`(런처가 `tailscale ip -4`로 주입) > DE 자체 Tailscale 대역(100.64.0.0/10) 자동탐지(`server/app.py` `_detect_tailscale_ip`) > `socket.gethostbyname` 폴백. 과거 `socket.gethostbyname`은 Docker/WSL/Wi-Fi 어댑터를 오선택해 cross-machine 도달 불가 주소를 광고하는 결함이 있었음(노트북 B가 LAN IP `10.26.x`를 등록해 operator assign-group 타임아웃). 수동 지정 시 **반드시 그 머신의 Tailscale IP(100.x)** — LAN/Wi-Fi IP 금지. (핫스팟 primary였던 5/26 전략은 Tailscale primary로 대체됨.)
 
 Phase migration PR scope에 `.env.example` 정합 확인 + AGENTS.md 본 절 amend 의무 (transitive 상속 박제 갭 차단). 옵시디언 [[2026-05-26-phase-18.1-d-0-hotspot-pivot-postponed]] 핵심 발견 6 + [[2026-05-26-track-1-doc-governance-correction-done]] 핵심 발견 2 정합.
 

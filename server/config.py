@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     # DUAL_2PC 세션 env (launcher 주입, 비-DUAL_2PC 기동 시 None)
     dual_2pc_group_id: str | None = None
     dual_2pc_subject_index: int | None = None
-    lan_ip: str | None = None  # LAN IP override (없으면 socket 자동 탐지)
+    lan_ip: str | None = (
+        None  # advertise IP override (없으면 Tailscale 자동탐지 후 socket 폴백)
+    )
 
     # Proxy 연동 (engine-proxy-sync Phase 18)
     proxy_url: str | None = None  # env PROXY_URL
