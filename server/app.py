@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from server.config import settings
-from server.routes import analyze, control, export, health, stream
+from server.routes import analyze, control, export, health, logs, stream
+from server.services import logbuffer
 from server.services.webhook import (
     register_to_backend,
     register_to_backend_dual,
@@ -269,3 +270,7 @@ app.include_router(analyze.router, prefix="/api", tags=["Analyze"])
 app.include_router(export.router, prefix="/api", tags=["Export"])
 app.include_router(stream.router, prefix="/api", tags=["Stream"])
 app.include_router(control.router, tags=["Control"])
+app.include_router(logs.router, tags=["Logs"])
+
+# 서버 로그를 링버퍼에 캡처해 대시보드에서 원격 조회 가능하게 함 (멱등)
+logbuffer.install()
