@@ -9,17 +9,24 @@ _BUFFER: deque[str] = deque(maxlen=1000)
 
 
 class _Tee:
-    """원본 스트림에 그대로 쓰면서 링버퍼에도 라인 캡처하는 래퍼임."""
+    """원본 스트림에 그대로 쓰면서 링버퍼에 개행 기준 라인 캡처하는 래퍼임."""
 
     def __init__(self, original: IO[str]) -> None:
         self._original = original
+        # 개행 없이 끊긴 부분 라인 잔여분 — 다음 write까지 보관함 (tail N 정확도)
+        self._remainder = ""
 
     def write(self, data: str) -> int:
         # 원본 콘솔 출력 보존함
         n = self._original.write(data)
-        text = data.strip()
-        if text:
-            _BUFFER.append(text)
+        combined = self._remainder + data
+        parts = combined.split("\n")
+        # 마지막 조각은 개행으로 끝나지 않은 부분 라인 — 잔여분으로 보관함
+        self._remainder = parts.pop()
+        for line in parts:
+            line = line.rstrip("\r")
+            if line.strip():
+                _BUFFER.append(line)
         return n
 
     def flush(self) -> None:

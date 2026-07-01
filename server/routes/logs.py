@@ -11,7 +11,7 @@ router = APIRouter()
 async def get_logs(
     request: Request,
     n: int = Query(200, alias="tail", ge=1, le=1000),
-    x_engine_secret: str = Header(alias="X-Engine-Secret"),
+    x_engine_secret: str | None = Header(default=None, alias="X-Engine-Secret"),
 ):
     """최근 서버 로그 라인 반환함 (secret 검증).
 
@@ -22,7 +22,7 @@ async def get_logs(
         lines 배열 + subject_index를 담은 dict.
 
     Raises:
-        HTTPException 401 — secret 불일치 시.
+        HTTPException 401 — secret 누락/불일치 시 (누락도 401로 통일).
     """
     if x_engine_secret != request.app.state.secret_key:
         raise HTTPException(status_code=401, detail={"error": "invalid_secret"})
