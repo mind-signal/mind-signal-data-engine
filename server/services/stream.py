@@ -13,6 +13,12 @@ _ENGINE_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 # core.main 자식 로그 디렉토리 (D7: stdout/stderr를 PIPE 대신 파일로 redirect함)
 _LOG_DIR = Path(_ENGINE_ROOT) / "logs"
 
+# CSV 저장 루트 — core/streamer.py의 base_path(레포 부모의 csv/)와 일치시킴.
+# streamer.py는 core/ 아래, 이 파일은 server/services/ 아래라 동일한 parent×3이 서로
+# 다른 폴더를 가리킴. 여기서 _ENGINE_ROOT(레포 루트)/csv 대신 그 부모/csv를 봐야
+# core.main이 실제로 쓴 원격 subject CSV를 찾음 (경로 불일치로 업로드 skip되던 것 정합).
+_CSV_DIR = str(Path(_ENGINE_ROOT).parent / "csv")
+
 # 실행 중인 스트리밍 프로세스 추적 dict — key: "{group_id}:{subject_index}"
 _processes: dict[str, subprocess.Popen] = {}
 
@@ -48,17 +54,14 @@ def _upload_subject_csv(group_id: str, subject_index: int) -> None:
 
     # group_id는 glob.escape로 감싸 *,?,[ 메타문자 오매칭 방지함 (CodeRabbit)
     pattern = os.path.join(
-        _ENGINE_ROOT,
-        "csv",
+        _CSV_DIR,
         f"subject_{subject_index}_{glob.escape(group_id)}_*.csv",
     )
     matches = sorted(glob.glob(pattern), key=os.path.getmtime)
     if not matches:
         print(f"[stop_stream] subject CSV 미발견, 업로드 skip: {pattern}")
         return
-    upload_csv_to_backend(
-        settings.backend_url, matches[-1], settings.engine_secret_key
-    )
+    upload_csv_to_backend(settings.backend_url, matches[-1], settings.engine_secret_key)
 
 
 def start_stream(group_id: str, subject_index: int) -> dict[str, Any]:
