@@ -166,8 +166,28 @@ class MindSignalStreamer(Cortex):
         Args:
             result_dic: query headset 응답 리스트 (sdk 부모 메서드와 동일한 인수).
         """
-        # 설정 headset_id가 비어 있으면 부모 자동 선택 로직 위임함
+        # headset_id 미지정 시 connected 헤드셋을 우선 선택함.
+        # SDK 기본 로직(super)은 headset_list[0](목록 첫 번째)를 무조건 골라, 첫 번째가
+        # discovered면 이미 connected된 헤드셋을 두고 connect 루프에 빠짐
+        # (2026-07-02 라이브: 8E9 discovered가 먼저라 connected 5B 미선택 + subscribe 실패).
         if not self.headset_id:
+            connected = [
+                ele["id"] for ele in result_dic if ele.get("status") == "connected"
+            ]
+            # PC당 실사용 헤드셋 1대 전제(2-PC). connected가 정확히 1대일 때만
+            # 우선 지정함. 2대 이상은 오선택 위험이라 자동선택 skip하고 SDK 기본
+            # 선택에 위임함 (codex 5.5 조건). connected 없으면 기존 폴백 유지.
+            if len(connected) == 1:
+                self.headset_id = connected[0]
+                print(
+                    f"[INFO] connected 헤드셋 '{self.headset_id}' 우선 선택함 "
+                    f"(subject {self.subject_index})"
+                )
+            elif len(connected) > 1:
+                print(
+                    f"[WARN] connected 헤드셋 {len(connected)}대 ({connected}) — "
+                    f"자동 우선선택 skip, SDK 기본 선택 위임 (subject {self.subject_index})"
+                )
             super()._handle_query_headset(result_dic)
             return
 

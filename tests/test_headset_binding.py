@@ -12,6 +12,8 @@ import sys
 import pytest
 
 import core.main as main_module
+from core.streamer import MindSignalStreamer
+from sdk.cortex import Cortex
 
 
 @pytest.mark.parametrize(
@@ -48,4 +50,59 @@ def test_main_ignores_headset_id_env_and_lets_sdk_pick_first(
     main_module.main()
 
     # 동적 바인딩: env의 하드코딩 ID를 절대 통과시키지 않고 빈 문자열을 넘겨야 한다.
+    assert captured["headset_id"] == ""
+
+
+def _make_streamer():
+    """Cortex.__init__ 부작용 없이 _handle_query_headset만 테스트하기 위한 인스턴스 생성함"""
+    s = MindSignalStreamer.__new__(MindSignalStreamer)
+    s.headset_id = ""
+    s.subject_index = 2
+    return s
+
+
+def _capture_super(monkeypatch):
+    """super()._handle_query_headset 호출 시점의 headset_id를 캡처함"""
+    captured = {}
+    monkeypatch.setattr(
+        Cortex,
+        "_handle_query_headset",
+        lambda self, rd: captured.update(headset_id=self.headset_id),
+    )
+    return captured
+
+
+def test_query_headset_prefers_single_connected(monkeypatch):
+    """discovered가 먼저여도 connected 헤드셋을 우선 지정함 (2026-07-02 subscribe 실패 회귀)."""
+    s = _make_streamer()
+    captured = _capture_super(monkeypatch)
+    result = [
+        {"id": "8E9", "status": "discovered", "connectedBy": "bluetooth"},
+        {"id": "5B", "status": "connected", "connectedBy": "bluetooth"},
+    ]
+    s._handle_query_headset(result)
+    assert s.headset_id == "5B"
+    assert captured["headset_id"] == "5B"
+
+
+def test_query_headset_skips_when_multiple_connected(monkeypatch):
+    """connected 2대 이상이면 오선택 방지로 자동 우선선택 skip하고 SDK 위임함."""
+    s = _make_streamer()
+    captured = _capture_super(monkeypatch)
+    result = [
+        {"id": "A", "status": "connected", "connectedBy": "bluetooth"},
+        {"id": "B", "status": "connected", "connectedBy": "bluetooth"},
+    ]
+    s._handle_query_headset(result)
+    assert s.headset_id == ""
+    assert captured["headset_id"] == ""
+
+
+def test_query_headset_no_connected_delegates(monkeypatch):
+    """connected가 없으면 headset_id 미지정 상태로 SDK 기본 폴백에 위임함 (#26 보존)."""
+    s = _make_streamer()
+    captured = _capture_super(monkeypatch)
+    result = [{"id": "8E9", "status": "discovered", "connectedBy": "bluetooth"}]
+    s._handle_query_headset(result)
+    assert s.headset_id == ""
     assert captured["headset_id"] == ""
