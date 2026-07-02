@@ -122,11 +122,15 @@ class TestAnalyzePipelineEndpoint:
         assert data["y_score"] is not None
 
     @patch("server.services.analysis.run_full_pipeline")
-    def test_csv_not_found_in_response(
+    def test_csv_not_found_returns_partial_200(
         self, mock_pipeline, test_client, pipeline_secret_header
     ):
-        """CSV 없는 subject의 응답 처리 검증함"""
-        # subjects에 error가 없는 정상 응답을 반환하되, 최소 구조만 갖춤
+        """한쪽 subject CSV 미발견 시 500 대신 200 + error 담은 partial 응답 반환함.
+
+        2-PC에서 원격 subject가 미수집되면 run_full_pipeline이 그 subject를
+        {subject_index, error}로 담음. SubjectFeatureResult가 feature 필드를 필수로
+        요구하면 여기서 ValidationError로 500이 났음(회귀 방지).
+        """
         mock_pipeline.return_value = {
             "group_id": TEST_GROUP_ID,
             "subjects": [
@@ -135,7 +139,8 @@ class TestAnalyzePipelineEndpoint:
                     "baseline": {"alpha": 0.5},
                     "features": {},
                     "n_features": 0,
-                }
+                },
+                {"subject_index": 2, "error": "CSV 파일 미발견"},
             ],
             "pair_features": None,
             "y_score": None,
@@ -153,10 +158,13 @@ class TestAnalyzePipelineEndpoint:
         }
         response = test_client.post(
             "/api/analyze/pipeline",
-            json={"group_id": TEST_GROUP_ID, "subject_indices": [1]},
+            json={"group_id": TEST_GROUP_ID, "subject_indices": [1, 2]},
             headers=pipeline_secret_header,
         )
         assert response.status_code == 200
+        data = response.json()
+        assert data["subjects"][1]["error"] == "CSV 파일 미발견"
+        assert data["subjects"][1]["features"] is None
 
     def test_invalid_body_missing_group_id(self, test_client, pipeline_secret_header):
         """group_id 미포함 body → 422 validation error 반환함"""

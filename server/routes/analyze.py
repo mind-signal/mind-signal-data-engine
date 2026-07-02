@@ -75,12 +75,18 @@ class PipelineRequest(BaseModel):
 
 
 class SubjectFeatureResult(BaseModel):
-    """피실험자별 feature 추출 결과 스키마임"""
+    """피실험자별 feature 추출 결과 스키마임
+
+    한쪽 subject의 CSV가 없으면(2-PC에서 원격 subject 미수집 등) feature 필드 없이
+    error만 채워 partial 응답으로 반환함. 이때 500 대신 200으로 내려 FE가 어느
+    subject가 실패했는지 판단하게 함.
+    """
 
     subject_index: int
-    baseline: dict[str, float]
-    features: dict[str, float]
-    n_features: int
+    baseline: dict[str, float] | None = None
+    features: dict[str, float] | None = None
+    n_features: int | None = None
+    error: str | None = None
 
 
 class PipelineResponse(BaseModel):
