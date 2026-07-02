@@ -6,6 +6,19 @@ import server.services.stream as stream_mod
 import server.services.webhook as webhook_mod
 
 
+def test_csv_dir_is_repo_parent_not_engine_root():
+    """CSV 검색 루트는 _ENGINE_ROOT/csv가 아니라 그 부모/csv여야 함.
+
+    core/streamer.py의 base_path(레포 부모/csv)에 실제 CSV가 저장되는데,
+    stream.py는 server/services/ 아래라 동일한 parent×3이 레포 루트를 가리켜
+    _ENGINE_ROOT/csv를 보면 원격 subject CSV를 못 찾고 업로드 skip됐음(경로 불일치 회귀).
+    """
+    assert stream_mod._CSV_DIR == os.path.join(
+        os.path.dirname(stream_mod._ENGINE_ROOT), "csv"
+    )
+    assert stream_mod._CSV_DIR != os.path.join(stream_mod._ENGINE_ROOT, "csv")
+
+
 def test_upload_subject_csv_uploads_latest(monkeypatch, tmp_path):
     """csv/ 에서 해당 group/subject의 최신 CSV를 골라 업로드함."""
     csv_dir = tmp_path / "csv"
@@ -17,7 +30,7 @@ def test_upload_subject_csv_uploads_latest(monkeypatch, tmp_path):
     os.utime(old, (1, 1))
     os.utime(new, (2, 2))  # new가 더 최근
 
-    monkeypatch.setattr(stream_mod, "_ENGINE_ROOT", str(tmp_path))
+    monkeypatch.setattr(stream_mod, "_CSV_DIR", str(csv_dir))
     captured = {}
     monkeypatch.setattr(
         webhook_mod,
@@ -36,7 +49,7 @@ def test_upload_subject_csv_escapes_glob_metachars(monkeypatch, tmp_path):
     target = csv_dir / "subject_2_G[1]_20260101_000000.csv"
     target.write_text("x")
 
-    monkeypatch.setattr(stream_mod, "_ENGINE_ROOT", str(tmp_path))
+    monkeypatch.setattr(stream_mod, "_CSV_DIR", str(csv_dir))
     captured = {}
     monkeypatch.setattr(
         webhook_mod,
@@ -50,8 +63,9 @@ def test_upload_subject_csv_escapes_glob_metachars(monkeypatch, tmp_path):
 
 def test_upload_subject_csv_skip_when_none(monkeypatch, tmp_path):
     """해당 CSV가 없으면 업로드 skip함 (호출 0)."""
-    (tmp_path / "csv").mkdir()
-    monkeypatch.setattr(stream_mod, "_ENGINE_ROOT", str(tmp_path))
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    monkeypatch.setattr(stream_mod, "_CSV_DIR", str(csv_dir))
     called = []
     monkeypatch.setattr(
         webhook_mod,
