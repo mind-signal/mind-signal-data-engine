@@ -225,3 +225,15 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 - **Python 경로**: conda 활성화 미선행 시 시스템 Python(3.13/3.9) 잡혀 의존성 깨짐 — 반드시 `conda activate mind-signal` 먼저
 
 상세: `.agents/rules/troubleshooting.md`.
+
+---
+
+## 계획 산출물 위치 (2026-07-10 표준화)
+
+mind-signal은 3레포 멀티레포 제품이므로 계획 산출물 `.plans/`는 **제품 단위 1개**로 상위 워크스페이스 `Team-project/.plans/`에 둔다. 레포 로컬 `.plans/`에는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 남긴다 — 작업 폴더(`{NN}-{기능명}`)를 여기에 새로 만들지 말 것.
+
+- 세션 핸드오프 정본: `Team-project/.plans/HANDOFF.md` (구 `_next-session-handoff.md`, 2026-07-10 고정명화)
+- 작업 폴더: `Team-project/.plans/{NN}-{기능명}` (예: `19-2pc-autoconnect-ops`)
+- 상태: `Team-project/.plans/STATE.md`
+- 아카이브: `Team-project/.plans/_archive/HANDOFF-YYYYMMDD.md`
+- docs/는 외부 전달물 전용
