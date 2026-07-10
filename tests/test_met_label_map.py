@@ -64,3 +64,16 @@ def test_missing_label_omits_key_instead_of_defaulting():
     met_map = build_met_map(["eng", "exc"])
     assert "focus" not in met_map
     assert met_map["engagement"] == 0
+
+
+def test_relabel_replaces_map_without_stale_keys():
+    """라벨 재수신 시 이전 매핑이 남지 않음 (CodeRabbit PR #36).
+
+    update()로 병합하면 이전 이벤트의 focus 인덱스가 남아, 새 라벨에
+    focus가 없는데도 on_new_met_data가 옛 인덱스로 값을 읽는다.
+    """
+    first = build_met_map(INSIGHT2_LABELS)
+    assert first["focus"] == 1
+
+    second = build_met_map(["eng", "exc", "str", "rel", "int"])
+    assert "focus" not in second

@@ -263,7 +263,10 @@ class MindSignalStreamer(Cortex):
         labels = data["labels"]
 
         if stream_name == "met":
-            self.met_map.update(build_met_map(labels))
+            # 라벨 이벤트가 재수신되면 매핑을 통째로 교체함. update()로 병합하면
+            # 이전 이벤트의 키와 인덱스가 남아 누락 경고가 무력화되고
+            # on_new_met_data가 옛 인덱스로 엉뚱한 값을 읽음 (CodeRabbit PR #36).
+            self.met_map = build_met_map(labels)
             missing = [k for k in MET_LABEL_CANDIDATES if k not in self.met_map]
             print(f"MET 인덱스 매핑 완료됨: {self.met_map}")
             if missing:
@@ -336,8 +339,12 @@ class MindSignalStreamer(Cortex):
                         }
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — 경보 발행 실패가 측정을 깨지 않음
+                # 조용히 삼키면 경보 자체가 사라진 걸 아무도 모름 (CodeRabbit PR #36)
+                logger.warning(
+                    f"[WATCHDOG] 상태 발행 실패 ({status}): {exc}"
+                    f" (subject {self.subject_index})"
+                )
 
         def _check():
             while self._watchdog_active:
