@@ -82,6 +82,7 @@ def post_sample(
     seq: int,
     payload: dict,
     sync_meta: dict,
+    metrics: dict | None = None,
     max_retries: int = 2,
     backoffs_sec: tuple[float, ...] = (0.1, 0.2),
 ) -> None:
@@ -95,6 +96,9 @@ def post_sample(
         seq: 엔진 단위 단조 증가 시퀀스 번호.
         payload: 5대역 파워 dict (delta/theta/alpha/beta/gamma).
         sync_meta: 동기화 메타 dict (de_clock_domain 포함).
+        metrics: EMOTIV 지표 6종 dict. None이면 envelope에서 생략함
+            (구버전 proxy 호환). 생략 시 FE 차트가 대역 파워를 지표로
+            오표시하던 결함이 재발하므로 라이브 경로에서는 항상 전달함.
         max_retries: 재시도 최대 횟수 (총 시도 = 1 + max_retries).
         backoffs_sec: 각 retry 전 대기 시간 (초) 순서 튜플.
 
@@ -113,6 +117,8 @@ def post_sample(
         "payload": payload,
         "sync_meta": sync_meta,
     }
+    if metrics is not None:
+        body["metrics"] = metrics
 
     last_exc: Exception | None = None
 

@@ -27,6 +27,38 @@ from server.services.webhook import upload_csv_to_backend
 
 logger = logging.getLogger(__name__)
 
+# Cortex met 스트림의 지표별 라벨 후보임. 헤드셋 세대마다 라벨명이 달라
+# 후보를 순서대로 탐색해 처음 발견된 것을 채택함.
+# Insight2는 focus를 'attention'으로 보냄 (2026-07-10 라이브 로그 실측).
+# 기존 코드가 'foc'만 찾아 focus가 전 구간 0으로 기록되던 결함을 수정함.
+MET_LABEL_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "focus": ("attention", "foc"),
+    "engagement": ("eng",),
+    "interest": ("int",),
+    "excitement": ("exc",),
+    "stress": ("str",),
+    "relaxation": ("rel",),
+}
+
+
+def build_met_map(labels: list[str]) -> dict[str, int]:
+    """Cortex met 라벨 배열에서 지표별 인덱스 매핑 생성함.
+
+    Args:
+        labels - Cortex가 보낸 met 스트림 라벨 배열임
+
+    Returns:
+        지표명을 라벨 인덱스로 매핑한 dict 반환. 후보 라벨을 하나도
+        찾지 못한 지표는 키 자체가 빠짐(호출부가 미발견을 감지 가능함).
+    """
+    met_map: dict[str, int] = {}
+    for met_key, candidates in MET_LABEL_CANDIDATES.items():
+        for label in candidates:
+            if label in labels:
+                met_map[met_key] = labels.index(label)
+                break
+    return met_map
+
 
 class MindSignalStreamer(Cortex):
     """
@@ -136,6 +168,8 @@ class MindSignalStreamer(Cortex):
         # 5. 측정 시작 시간 및 watchdog 상태 초기화함
         self.start_time = time.time()
         self.last_data_time = time.time()
+        # MET 스트림은 EEG와 별개 수신 시각을 추적함 (한쪽만 죽는 경우 감지용)
+        self.last_met_time = time.time()
         self._watchdog_active = False
         self._watchdog_interval = 30  # 무데이터 감지 임계값(초)
 
@@ -229,18 +263,14 @@ class MindSignalStreamer(Cortex):
         labels = data["labels"]
 
         if stream_name == "met":
-            target_metrics = {
-                "foc": "focus",
-                "eng": "engagement",
-                "int": "interest",
-                "exc": "excitement",
-                "str": "stress",
-                "rel": "relaxation",
-            }
-            for label_key, met_key in target_metrics.items():
-                if label_key in labels:
-                    self.met_map[met_key] = labels.index(label_key)
+            # 라벨 이벤트가 재수신되면 매핑을 통째로 교체함. update()로 병합하면
+            # 이전 이벤트의 키와 인덱스가 남아 누락 경고가 무력화되고
+            # on_new_met_data가 옛 인덱스로 엉뚱한 값을 읽음 (CodeRabbit PR #36).
+            self.met_map = build_met_map(labels)
+            missing = [k for k in MET_LABEL_CANDIDATES if k not in self.met_map]
             print(f"MET 인덱스 매핑 완료됨: {self.met_map}")
+            if missing:
+                print(f"[WARN] MET 라벨 미발견: {missing} (labels={labels})")
 
         elif stream_name == "eeg":
             target_eeg_channels = ["AF3", "T7", "Pz", "T8", "AF4"]
@@ -295,27 +325,51 @@ class MindSignalStreamer(Cortex):
     def _start_watchdog(self):
         """무데이터 감지 watchdog 스레드 시작함"""
 
+        def _publish_status(status: str, elapsed: float) -> None:
+            try:
+                self.r.publish(
+                    self.channel,
+                    json.dumps(
+                        {
+                            "type": "headset_status",
+                            "status": status,
+                            "subjectIndex": self.subject_index,
+                            "groupId": self.group_id,
+                            "silentSeconds": round(elapsed),
+                        }
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — 경보 발행 실패가 측정을 깨지 않음
+                # 조용히 삼키면 경보 자체가 사라진 걸 아무도 모름 (CodeRabbit PR #36)
+                logger.warning(
+                    f"[WATCHDOG] 상태 발행 실패 ({status}): {exc}"
+                    f" (subject {self.subject_index})"
+                )
+
         def _check():
             while self._watchdog_active:
-                elapsed = time.time() - self.last_data_time
-                if elapsed > self._watchdog_interval:
+                now = time.time()
+
+                eeg_elapsed = now - self.last_data_time
+                if eeg_elapsed > self._watchdog_interval:
                     logger.warning(
-                        f"[WATCHDOG] {elapsed:.0f}초간 EEG 데이터 미수신"
+                        f"[WATCHDOG] {eeg_elapsed:.0f}초간 EEG 데이터 미수신"
                         f" (subject {self.subject_index})"
                     )
-                    try:
-                        status_msg = json.dumps(
-                            {
-                                "type": "headset_status",
-                                "status": "no_data",
-                                "subjectIndex": self.subject_index,
-                                "groupId": self.group_id,
-                                "silentSeconds": round(elapsed),
-                            }
-                        )
-                        self.r.publish(self.channel, status_msg)
-                    except Exception:
-                        pass
+                    _publish_status("no_data", eeg_elapsed)
+
+                # MET는 EEG와 별개 스트림임. EEG만 살아 있고 MET가 죽으면
+                # latest_met이 마지막 값을 무한 반복해 CSV에 얼어붙은 지표가
+                # 기록되는데, EEG 기준 watchdog만으로는 감지되지 않음
+                # (2026-07-10 교차검토에서 식별함).
+                met_elapsed = now - self.last_met_time
+                if met_elapsed > self._watchdog_interval:
+                    logger.warning(
+                        f"[WATCHDOG] {met_elapsed:.0f}초간 MET 지표 미수신"
+                        f" (subject {self.subject_index})"
+                    )
+                    _publish_status("metrics_stale", met_elapsed)
+
                 time.sleep(10)
 
         t = threading.Thread(target=_check, daemon=True)
@@ -340,6 +394,8 @@ class MindSignalStreamer(Cortex):
     def on_new_met_data(self, *args, **kwargs):
         """수신된 MET 배열에서 매핑된 점수 값만 추출함"""
         data = kwargs.get("data")["met"]
+        # MET 전용 watchdog 타임스탬프 갱신함 (EEG와 독립)
+        self.last_met_time = time.time()
         for key, index in self.met_map.items():
             if index < len(data):
                 self.latest_met[key] = data[index]
@@ -408,6 +464,7 @@ class MindSignalStreamer(Cortex):
                         subject_idx=self.subject_index,
                         seq=self.seq,
                         payload=powers,
+                        metrics=dict(self.latest_met),
                         sync_meta={"de_clock_domain": "monotonic_ns"},
                         max_retries=self.max_proxy_post_retries,
                     )

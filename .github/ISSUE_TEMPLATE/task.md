@@ -1,6 +1,6 @@
 ---
 name: "🔧 TASK"
-about: ".plans/에서 생성된 개발 작업 (dispatch 실행용)"
+about: "Team-project/.plans/에서 생성된 개발 작업 (dispatch 실행용)"
 title: ""
 labels: "task"
 assignees: ""
@@ -13,7 +13,7 @@ assignees: ""
 
 ## 관련 Phase
 - Phase: ``
-- Plan: `.plans//PLAN.md`
+- Plan: `Team-project/.plans/{NN}-{기능명}/PLAN.md`
 
 ## 할 일 (변경 파일 + diff 명세)
 - [ ] `src/path/file` — 신규/수정: 설명
