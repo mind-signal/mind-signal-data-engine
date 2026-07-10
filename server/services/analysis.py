@@ -1,3 +1,4 @@
+import logging
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -5,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from core.analyzer import MindSignalAnalyzer
+
+logger = logging.getLogger(__name__)
 
 # CSV 저장 기본 경로 (streamer.py와 동일한 위치)
 CSV_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "csv"
@@ -124,24 +127,73 @@ def compute_subject_summary(df: pd.DataFrame) -> dict:
     return summary
 
 
+def align_on_second(
+    df1: pd.DataFrame, df2: pd.DataFrame, column: str
+) -> pd.DataFrame | None:
+    """두 피실험자 시계열을 공통 절대시각(정수 초) 격자에서 정렬함.
+
+    각 timestamp를 초 단위로 내림한 뒤 같은 초끼리 평균 집계하고 교집합만 남김.
+    merge_asof 최근접 매칭을 쓰지 않는 이유: 두 스트림의 초 경계 위상차와
+    행 간격 드리프트 때문에 경계 부근에서 최근접 이웃이 뒤집혀 상관값이
+    pandas 버전과 부동소수에 민감해짐 (2026-07-10 교차검토).
+
+    Args:
+        df1 - subject 1 시계열, timestamp 컬럼 필요함
+        df2 - subject 2 시계열, timestamp 컬럼 필요함
+        column - 정렬 대상 값 컬럼명임
+
+    Returns:
+        `sec`, `{column}_1`, `{column}_2` 컬럼을 가진 DataFrame 반환.
+        timestamp 컬럼이 없으면 None 반환(호출부가 폴백 판단함).
+    """
+    if "timestamp" not in df1.columns or "timestamp" not in df2.columns:
+        return None
+
+    frames = []
+    for df in (df1, df2):
+        sec = pd.to_datetime(df["timestamp"]).dt.floor("s")
+        frames.append(
+            pd.DataFrame({"sec": sec, column: df[column].values})
+            .groupby("sec", as_index=False)[column]
+            .mean()
+        )
+
+    return frames[0].merge(frames[1], on="sec", how="inner", suffixes=("_1", "_2"))
+
+
 def compute_synchrony(df1: pd.DataFrame, df2: pd.DataFrame) -> float | None:
-    """두 피실험자 간 뇌파 동기화 점수를 계산함 (trimming 적용)"""
+    """두 피실험자 간 뇌파 동기화 점수를 계산함 (trimming 적용).
+
+    각 피실험자의 진정 구간을 먼저 제거한 뒤 공통 절대시각 구간만 비교함.
+    측정 시작 시각이 어긋나도(2026-07-10 라이브: 38.3초 차이) 같은 시각끼리
+    맞대므로 시차가 상관에 섞이지 않음.
+    """
     analyzer = MindSignalAnalyzer()
 
     # trimming 적용 — 진정 구간 제외한 유효 구간만 사용함
     trimmed1, _ = trim_dataframe(df1)
     trimmed2, _ = trim_dataframe(df2)
 
-    # 공통 길이로 맞춤
-    min_len = min(len(trimmed1), len(trimmed2))
-    if min_len < 10:
+    aligned = align_on_second(trimmed1, trimmed2, "alpha")
+
+    if aligned is None:
+        # timestamp 부재 시 구 위치 정렬로 폴백함 (합성 픽스처 호환)
+        logger.warning("timestamp 컬럼 부재로 위치 기반 정렬 폴백함")
+        min_len = min(len(trimmed1), len(trimmed2))
+        if min_len < 10:
+            return None
+        alpha1 = trimmed1["alpha"].values[:min_len]
+        alpha2 = trimmed2["alpha"].values[:min_len]
+        return float(analyzer.calculate_synchrony(alpha1, alpha2))
+
+    if len(aligned) < 10:
         return None
 
-    # alpha 대역 기준 동기화 계산 수행함
-    alpha1 = trimmed1["alpha"].values[:min_len]
-    alpha2 = trimmed2["alpha"].values[:min_len]
-
-    return float(analyzer.calculate_synchrony(alpha1, alpha2))
+    return float(
+        analyzer.calculate_synchrony(
+            aligned["alpha_1"].values, aligned["alpha_2"].values
+        )
+    )
 
 
 def compute_session_analysis(group_id: str, subject_indices: list[int]) -> dict:
