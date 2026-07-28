@@ -28,9 +28,10 @@ def band_cols():
 
 @pytest.fixture
 def simple_df():
-    """time 컬럼 없이 band_cols만 포함한 100행 DataFrame 반환함"""
+    """1초 간격 timestamp와 band_cols를 포함한 100행 DataFrame 반환함"""
     np.random.seed(42)
     data = {
+        "timestamp": pd.date_range("2026-01-01", periods=100, freq="s"),
         "alpha": np.random.uniform(0.1, 1.0, 100),
         "beta": np.random.uniform(0.1, 1.0, 100),
         "theta": np.random.uniform(0.1, 1.0, 100),
@@ -44,7 +45,10 @@ def timestamped_df():
     """'timestamp' 컬럼 포함 — 동일 timestamp에 복수 행 존재하는 DataFrame 반환함"""
     np.random.seed(42)
     # 각 timestamp에 3개 샘플씩 30개 timestamp = 90행
-    timestamps = np.repeat(np.arange(30), 3)
+    timestamps = np.repeat(
+        pd.date_range("2026-01-01", periods=30, freq="s").values,
+        3,
+    )
     data = {
         "timestamp": timestamps,
         "alpha": np.random.uniform(0.1, 1.0, 90),
@@ -63,6 +67,11 @@ def full_session_df():
     """
     np.random.seed(42)
     data = {
+        "timestamp": pd.date_range(
+            "2026-01-01",
+            periods=FULL_SESSION_ROWS,
+            freq="s",
+        ),
         "alpha": np.random.uniform(0.1, 1.0, FULL_SESSION_ROWS),
         "beta": np.random.uniform(0.1, 1.0, FULL_SESSION_ROWS),
         "theta": np.random.uniform(0.1, 1.0, FULL_SESSION_ROWS),

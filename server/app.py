@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from server.config import settings
 from server.routes import analyze, control, export, health, logs, stream
 from server.services import logbuffer
+from server.services.analysis import AnalysisContractError
 from server.services.webhook import (
     register_to_backend,
     register_to_backend_dual,
@@ -320,6 +322,19 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(AnalysisContractError)
+async def analysis_contract_error_handler(
+    request: Request,
+    exc: AnalysisContractError,
+) -> JSONResponse:
+    """분석 계약 오류를 최상위 평면 422 응답으로 변환함"""
+    return JSONResponse(
+        status_code=422,
+        content={"error_code": exc.error_code, "detail": exc.detail},
+    )
+
 
 app.include_router(health.router, tags=["Health"])
 app.include_router(analyze.router, prefix="/api", tags=["Analyze"])

@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest  # noqa: F401
 
+from server.services.analysis import AnalysisContractError
 from tests.conftest import TEST_GROUP_ID, TEST_SECRET  # noqa: F401
 
 
@@ -174,6 +175,69 @@ class TestAnalyzePipelineEndpoint:
             headers=pipeline_secret_header,
         )
         assert response.status_code == 422
+
+    @pytest.mark.parametrize("mode", ["DUAL", "DUAL_2PC"])
+    @pytest.mark.parametrize(
+        ("error_code", "detail"),
+        # subject 단위 위반(TIMESTAMP_*, BASELINE_*)은 partial 200으로 흡수되므로
+        # 전역 422로 탈출하는 공통 구간 위반만 라우트 계약으로 검증함
+        [("COMMON_WINDOW_TOO_SHORT", "공통 구간 부족")],
+    )
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_analysis_contract_error_returns_flat_422_in_both_dual_paths(
+        self,
+        mock_pipeline,
+        error_code,
+        detail,
+        mode,
+        test_client,
+        pipeline_secret_header,
+    ):
+        """두 DUAL 호출 경로에서 분석 계약 오류를 평면 422로 반환함"""
+        mock_pipeline.side_effect = AnalysisContractError(error_code, detail)
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "mode": mode,
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 422
+        assert response.json() == {
+            "error_code": error_code,
+            "detail": detail,
+        }
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"window_size_sec": 0},
+            {"baseline_duration_sec": -1},
+            {"band_cols": []},
+            {"stimulus_duration_sec": 61, "window_size_sec": 10},
+        ],
+    )
+    def test_invalid_pipeline_params_use_fastapi_validation_422(
+        self,
+        params,
+        test_client,
+        pipeline_secret_header,
+    ):
+        """비정상 파라미터를 실행 전 FastAPI validation 422로 거부함"""
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "params": params,
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 422
+        assert "detail" in response.json()
+        assert "error_code" not in response.json()
 
 
 class TestAnalyzePipelineModeField:

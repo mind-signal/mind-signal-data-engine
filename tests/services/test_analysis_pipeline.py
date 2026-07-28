@@ -9,6 +9,9 @@ import pandas as pd
 import pytest
 
 from server.services.analysis import (
+    CSV_BASE_DIR,
+    AnalysisContractError,
+    WindowSlot,
     analyze_pipeline_sequential,
     average_by_timestamp,
     build_pair_features,
@@ -29,51 +32,48 @@ from tests.conftest import (
 
 
 class TestAverageByTimestamp:
-    def test_no_time_col_returns_band_cols_only(self, simple_df, band_cols):
-        """time/timestamp 컬럼 없는 DataFrame → 반환 컬럼이 band_cols와 일치함"""
-        result = average_by_timestamp(simple_df, band_cols)
-        assert list(result.columns) == band_cols
-
-    def test_no_time_col_preserves_row_count(self, simple_df, band_cols):
-        """time 컬럼 없으면 행 수 변화 없음"""
-        result = average_by_timestamp(simple_df, band_cols)
-        assert len(result) == len(simple_df)
-
-    def test_no_time_col_index_reset(self, simple_df, band_cols):
-        """반환 DataFrame의 index가 0부터 연속 정수임"""
-        result = average_by_timestamp(simple_df, band_cols)
-        assert list(result.index) == list(range(len(result)))
+    def test_timestamp_missing_raises_contract_error(self, band_cols):
+        """timestamp 컬럼 누락 시 명시적 계약 오류가 발생함"""
+        df = pd.DataFrame({band: [1.0] for band in band_cols})
+        with pytest.raises(AnalysisContractError) as exc_info:
+            average_by_timestamp(df, band_cols)
+        assert exc_info.value.error_code == "TIMESTAMP_COLUMN_MISSING"
 
     def test_timestamp_col_groups_and_averages(self, timestamped_df, band_cols):
         """timestamp 컬럼 존재 시 동일 timestamp의 값이 평균화되어 행 수 감소함"""
         result = average_by_timestamp(timestamped_df, band_cols)
         # 30개 unique timestamp → 30행으로 축소
         assert len(result) == 30
+        assert list(result.columns) == ["timestamp", *band_cols]
+        assert result["timestamp"].is_monotonic_increasing
 
-    def test_time_col_preferred_over_timestamp(self, band_cols):
-        """'time'과 'timestamp' 동시 존재 시 'time' 우선 사용함"""
-        np.random.seed(42)
+    def test_same_second_samples_are_averaged(self, band_cols):
+        """마이크로초가 다른 같은 초 샘플을 하나로 평균화함"""
         df = pd.DataFrame(
             {
-                "time": [0, 0, 1, 1],
-                "timestamp": [10, 10, 20, 20],
-                "alpha": [1.0, 3.0, 2.0, 4.0],
-                "beta": [0.5, 0.5, 1.5, 1.5],
-                "theta": [0.1, 0.3, 0.2, 0.4],
-                "gamma": [0.2, 0.4, 0.3, 0.5],
+                "timestamp": [
+                    "2026-01-01 00:00:00.100",
+                    "2026-01-01 00:00:00.900",
+                ],
+                **{band: [1.0, 3.0] for band in band_cols},
             }
         )
         result = average_by_timestamp(df, band_cols)
-        # 'time' 기준 2개 그룹 → 2행
-        assert len(result) == 2
+        assert len(result) == 1
+        assert result.loc[0, "alpha"] == 2.0
+        assert result.loc[0, "timestamp"] == pd.Timestamp("2026-01-01")
 
-    def test_partial_band_cols_in_df(self):
-        """DataFrame에 band_cols 일부만 존재할 때 존재하는 것만 반환함"""
-        df = pd.DataFrame({"alpha": [1.0, 2.0], "beta": [3.0, 4.0]})
-        result = average_by_timestamp(df, ["alpha", "beta", "nonexistent"])
-        assert "nonexistent" not in result.columns
-        assert "alpha" in result.columns
-        assert "beta" in result.columns
+    def test_unparsable_timestamp_raises_contract_error(self, band_cols):
+        """전 행 timestamp 파싱 실패 시 명시적 계약 오류가 발생함"""
+        df = pd.DataFrame(
+            {
+                "timestamp": ["invalid", None],
+                **{band: [1.0, 2.0] for band in band_cols},
+            }
+        )
+        with pytest.raises(AnalysisContractError) as exc_info:
+            average_by_timestamp(df, band_cols)
+        assert exc_info.value.error_code == "TIMESTAMP_UNPARSABLE"
 
 
 # ──────────────────────────────────────────────
@@ -87,8 +87,8 @@ class TestComputeBaseline:
         result = compute_baseline(simple_df, band_cols)
         assert set(result.keys()) == set(band_cols)
 
-    def test_mean_of_first_n_rows(self, simple_df, band_cols):
-        """값이 실제 첫 30행의 평균과 일치함"""
+    def test_mean_of_absolute_time_interval(self, simple_df, band_cols):
+        """값이 절대시각 기준 첫 30초의 평균과 일치함"""
         result = compute_baseline(simple_df, band_cols, baseline_duration_sec=30)
         expected_alpha = float(simple_df["alpha"].iloc[:30].mean())
         assert abs(result["alpha"] - expected_alpha) < 1e-10
@@ -100,11 +100,20 @@ class TestComputeBaseline:
         assert abs(result["alpha"] - expected) < 1e-10
 
     def test_missing_band_col_excluded(self):
-        """DataFrame에 없는 band 컬럼은 결과 dict에서 제외됨"""
-        df = pd.DataFrame({"alpha": [1.0, 2.0, 3.0]})
-        result = compute_baseline(df, ["alpha", "nonexistent"], baseline_duration_sec=3)
-        assert "alpha" in result
-        assert "nonexistent" not in result
+        """요청 대역이 누락되면 baseline coverage 오류가 발생함"""
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=3, freq="s"),
+                "alpha": [1.0, 2.0, 3.0],
+            }
+        )
+        with pytest.raises(AnalysisContractError) as exc_info:
+            compute_baseline(
+                df,
+                ["alpha", "nonexistent"],
+                baseline_duration_sec=3,
+            )
+        assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
 
     def test_values_are_float(self, simple_df, band_cols):
         """반환 dict의 모든 value가 float 타입임"""
@@ -119,48 +128,55 @@ class TestComputeBaseline:
 
 
 class TestSplitStimulusWindows:
-    def test_returns_nested_list_structure(self, full_session_df, band_cols):
-        """반환값이 list[list[DataFrame]] 구조임"""
+    def test_returns_fixed_window_slots(self, full_session_df, band_cols):
+        """반환값이 고정 식별자를 가진 WindowSlot 목록임"""
         result = split_stimulus_windows(full_session_df, band_cols)
         assert isinstance(result, list)
-        assert isinstance(result[0], list)
-        assert isinstance(result[0][0], pd.DataFrame)
+        assert isinstance(result[0], WindowSlot)
+        assert isinstance(result[0].data, pd.DataFrame)
 
     def test_n_stimuli_length(self, full_session_df, band_cols):
-        """외부 리스트 길이가 n_stimuli와 일치함"""
+        """슬롯 수가 n_stimuli × n_windows와 일치함"""
         result = split_stimulus_windows(full_session_df, band_cols, n_stimuli=10)
-        assert len(result) == 10
+        assert len(result) == 60
 
     def test_n_windows_per_stimulus(self, full_session_df, band_cols):
-        """데이터 충분할 때 각 stimulus의 window 수가 올바름"""
+        """데이터 충분할 때 자극별 고정 window 식별자가 올바름"""
         result = split_stimulus_windows(
             full_session_df, band_cols, stimulus_duration_sec=60, window_size_sec=10
         )
-        # 첫 번째 stimulus는 데이터 충분 → 6개 window
-        assert len(result[0]) == 6
+        assert [(slot.stim_idx, slot.win_idx) for slot in result[:6]] == [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+        ]
 
     def test_window_row_count(self, full_session_df, band_cols):
         """각 window DataFrame의 행 수가 window_size_sec과 일치함"""
         result = split_stimulus_windows(full_session_df, band_cols, window_size_sec=10)
-        assert len(result[0][0]) == 10
+        assert result[0].data is not None
+        assert len(result[0].data) == 10
 
     def test_baseline_rows_excluded(self, full_session_df, band_cols):
-        """baseline 이전 행이 window에 포함되지 않음"""
+        """첫 윈도우가 공통 시작시각의 baseline 종료 후 시작함"""
         result = split_stimulus_windows(
             full_session_df, band_cols, baseline_duration_sec=30
         )
-        # 첫 window의 첫 행은 df.iloc[30]과 동일해야 함
-        first_win = result[0][0]
-        pd.testing.assert_frame_equal(
-            first_win,
-            full_session_df[band_cols].iloc[30:40].reset_index(drop=True),
-        )
+        assert result[0].window_start == pd.Timestamp("2026-01-01 00:00:30")
+        assert result[0].window_end == pd.Timestamp("2026-01-01 00:00:40")
+        assert result[0].data is not None
+        assert result[0].data["timestamp"].min() == result[0].window_start
 
     def test_short_data_partial_windows(self, band_cols):
-        """데이터가 짧아 일부 stimulus가 비어있을 때 오류 미발생함"""
-        # baseline(30) + 1 stimulus(60) = 90행만 제공, n_stimuli=3 요청
+        """데이터가 짧아도 후속 슬롯 ID가 유지되고 data만 None이 됨"""
         short_df = pd.DataFrame(
-            {col: np.random.uniform(0.1, 1.0, 90) for col in band_cols}
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=90, freq="s"),
+                **{col: np.random.uniform(0.1, 1.0, 90) for col in band_cols},
+            }
         )
         result = split_stimulus_windows(
             short_df,
@@ -170,22 +186,46 @@ class TestSplitStimulusWindows:
             n_stimuli=3,
             baseline_duration_sec=30,
         )
-        assert len(result) == 3
-        assert len(result[0]) == 6  # 첫 stimulus는 완전함
-        # 두 번째, 세 번째 stimulus는 빈 리스트이거나 window 수 부족
-        assert len(result[2]) == 0  # 데이터 부족
+        assert len(result) == 18
+        assert all(slot.data is not None for slot in result[:6])
+        assert all(slot.data is None for slot in result[6:])
+        assert result[-1].stim_idx == 2
+        assert result[-1].win_idx == 5
 
     def test_window_cols_match_band_cols(self, full_session_df, band_cols):
-        """각 window DataFrame의 컬럼이 band_cols와 일치함"""
+        """각 window DataFrame이 timestamp와 band_cols를 보존함"""
         result = split_stimulus_windows(full_session_df, band_cols)
-        assert list(result[0][0].columns) == band_cols
+        assert result[0].data is not None
+        assert list(result[0].data.columns) == ["timestamp", *band_cols]
 
     def test_index_reset_in_each_window(self, full_session_df, band_cols):
         """각 window DataFrame의 index가 0부터 시작함"""
-        result = split_stimulus_windows(full_session_df, band_cols)
-        for stim_windows in result:
-            for win_df in stim_windows:
-                assert win_df.index[0] == 0
+        slots = split_stimulus_windows(full_session_df, band_cols)
+        for slot in slots:
+            assert slot.data is not None
+            assert slot.data.index[0] == 0
+
+    def test_boundary_sample_belongs_to_next_window(self, band_cols):
+        """경계 시각 샘플이 앞이 아니라 다음 반개구간에 포함됨"""
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=50, freq="s"),
+                **{band: np.arange(50, dtype=float) for band in band_cols},
+            }
+        )
+        slots = split_stimulus_windows(
+            df,
+            band_cols,
+            stimulus_duration_sec=20,
+            window_size_sec=10,
+            n_stimuli=1,
+            baseline_duration_sec=30,
+        )
+        assert slots[0].data is not None
+        assert slots[1].data is not None
+        boundary = pd.Timestamp("2026-01-01 00:00:40")
+        assert boundary not in set(slots[0].data["timestamp"])
+        assert boundary in set(slots[1].data["timestamp"])
 
 
 # ──────────────────────────────────────────────
@@ -199,15 +239,30 @@ class TestExtractFeatures:
         if band_cols is None:
             band_cols = DEFAULT_BAND_COLS
         windows = []
+        origin = pd.Timestamp("2026-01-01")
         for s in range(n_stim):
-            stim_wins = []
             for w in range(n_win):
                 data = {
-                    band: [float(s + w + i) * 0.1 for i in range(10)]
-                    for band in band_cols
+                    "timestamp": pd.date_range(
+                        origin + pd.Timedelta(seconds=(s * n_win + w) * 10),
+                        periods=10,
+                        freq="s",
+                    ),
+                    **{
+                        band: [float(s + w + i) * 0.1 for i in range(10)]
+                        for band in band_cols
+                    },
                 }
-                stim_wins.append(pd.DataFrame(data))
-            windows.append(stim_wins)
+                window_start = origin + pd.Timedelta(seconds=(s * n_win + w) * 10)
+                windows.append(
+                    WindowSlot(
+                        stim_idx=s,
+                        win_idx=w,
+                        window_start=window_start,
+                        window_end=window_start + pd.Timedelta(seconds=10),
+                        data=pd.DataFrame(data),
+                    )
+                )
         return windows
 
     def test_key_naming_convention(self, band_cols):
@@ -236,7 +291,8 @@ class TestExtractFeatures:
         """baseline=None 시 feature값이 window 평균과 동일함"""
         windows = self._make_windows(1, 1, band_cols)
         result = extract_features(windows, band_cols, baseline=None)
-        expected = float(windows[0][0]["alpha"].mean())
+        assert windows[0].data is not None
+        expected = float(windows[0].data["alpha"].mean())
         assert abs(result["s1_w1_alpha"] - expected) < 1e-10
 
     def test_baseline_subtraction(self, band_cols):
@@ -244,7 +300,8 @@ class TestExtractFeatures:
         windows = self._make_windows(1, 1, band_cols)
         baseline = {"alpha": 0.5, "beta": 0.5, "theta": 0.5, "gamma": 0.5}
         result = extract_features(windows, band_cols, baseline=baseline)
-        expected = float(windows[0][0]["alpha"].mean()) - 0.5
+        assert windows[0].data is not None
+        expected = float(windows[0].data["alpha"].mean()) - 0.5
         assert abs(result["s1_w1_alpha"] - expected) < 1e-10
 
     def test_returns_ordered_dict(self, band_cols):
@@ -255,10 +312,33 @@ class TestExtractFeatures:
 
     def test_missing_band_in_window_skipped(self):
         """window DataFrame에 없는 band는 feature에서 건너뜀"""
-        windows = [[pd.DataFrame({"alpha": [1.0, 2.0]})]]
+        origin = pd.Timestamp("2026-01-01")
+        windows = [
+            WindowSlot(
+                stim_idx=0,
+                win_idx=0,
+                window_start=origin,
+                window_end=origin + pd.Timedelta(seconds=2),
+                data=pd.DataFrame({"alpha": [1.0, 2.0]}),
+            )
+        ]
         result = extract_features(windows, ["alpha", "nonexistent"])
         assert "s1_w1_alpha" in result
         assert "s1_w1_nonexistent" not in result
+
+    def test_none_slot_keeps_later_window_label(self, band_cols):
+        """중간 결측 슬롯 뒤 feature 라벨이 당겨지지 않음"""
+        windows = self._make_windows(1, 3, band_cols)
+        windows[1] = WindowSlot(
+            stim_idx=0,
+            win_idx=1,
+            window_start=windows[1].window_start,
+            window_end=windows[1].window_end,
+            data=None,
+        )
+        result = extract_features(windows, band_cols)
+        assert "s1_w2_alpha" not in result
+        assert "s1_w3_alpha" in result
 
 
 # ──────────────────────────────────────────────
@@ -268,14 +348,14 @@ class TestExtractFeatures:
 
 class TestBuildPairFeatures:
     def test_a_prefix_applied(self, sample_features):
-        """features_a의 키에 'a_' 접두사가 붙음"""
-        result = build_pair_features(sample_features, {})
+        """교집합 features_a의 키에 'a_' 접두사가 붙음"""
+        result = build_pair_features(sample_features, sample_features)
         for key in sample_features:
             assert f"a_{key}" in result
 
     def test_b_prefix_applied(self, sample_features):
-        """features_b의 키에 'b_' 접두사가 붙음"""
-        result = build_pair_features({}, sample_features)
+        """교집합 features_b의 키에 'b_' 접두사가 붙음"""
+        result = build_pair_features(sample_features, sample_features)
         for key in sample_features:
             assert f"b_{key}" in result
 
@@ -304,6 +384,16 @@ class TestBuildPairFeatures:
         a_end = max(i for i, k in enumerate(keys) if k.startswith("a_"))
         b_start = min(i for i, k in enumerate(keys) if k.startswith("b_"))
         assert a_end < b_start
+
+    def test_one_sided_slot_excluded_from_both_subjects(self):
+        """한쪽에만 있는 슬롯은 pair 양쪽에서 모두 제외됨"""
+        features_a = {"s2_w3_alpha": 0.1, "s2_w4_alpha": 0.2}
+        features_b = {"s2_w4_alpha": 0.3}
+        result = build_pair_features(features_a, features_b)
+        assert "a_s2_w3_alpha" not in result
+        assert "b_s2_w3_alpha" not in result
+        assert "a_s2_w4_alpha" in result
+        assert "b_s2_w4_alpha" in result
 
 
 # ──────────────────────────────────────────────
@@ -427,6 +517,320 @@ class TestRunFullPipeline:
         """MindSignalAnalyzer.calculate_synchrony Mock → 0.75 반환함"""
         result = run_full_pipeline(TEST_GROUP_ID, [1, 2])
         assert result["synchrony_score"] == 0.75
+
+    def test_subjects_with_39_second_offset_use_same_absolute_window(
+        self,
+        monkeypatch,
+    ):
+        """39초 늦게 시작한 subject를 공통 절대시각 윈도우로 정렬함"""
+        absolute_origin = pd.Timestamp("2026-01-01")
+
+        def make_frame(start_second, seconds):
+            timestamps = pd.date_range(
+                absolute_origin + pd.Timedelta(seconds=start_second),
+                periods=seconds,
+                freq="s",
+            )
+            values = (timestamps - absolute_origin).total_seconds().astype(float)
+            return pd.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "alpha": values,
+                }
+            )
+
+        frames = {
+            1: make_frame(39, 101),
+            2: make_frame(0, 140),
+        }
+        monkeypatch.setattr(
+            "server.services.analysis.load_session_data",
+            lambda path: frames[1 if "subject_1_" in str(path) else 2].copy(),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1, 2],
+            stimulus_duration_sec=20,
+            window_size_sec=10,
+            n_stimuli=1,
+            baseline_duration_sec=10,
+            band_cols=["alpha"],
+        )
+        subject_a, subject_b = result["subjects"]
+        assert subject_a["features"] == subject_b["features"]
+        assert subject_a["features"]["s1_w1_alpha"] == 10.0
+
+    def test_common_end_trims_later_subject_and_keeps_feature_counts_symmetric(
+        self,
+        monkeypatch,
+    ):
+        """한쪽 조기 종료 시 common_end 이후 양쪽 feature를 생성하지 않음"""
+
+        def make_frame(seconds):
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range(
+                        "2026-01-01",
+                        periods=seconds,
+                        freq="s",
+                    ),
+                    "alpha": np.arange(seconds, dtype=float),
+                }
+            )
+
+        frames = {1: make_frame(70), 2: make_frame(100)}
+        monkeypatch.setattr(
+            "server.services.analysis.load_session_data",
+            lambda path: frames[1 if "subject_1_" in str(path) else 2].copy(),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1, 2],
+            stimulus_duration_sec=20,
+            window_size_sec=10,
+            n_stimuli=4,
+            baseline_duration_sec=10,
+            band_cols=["alpha"],
+        )
+        counts = [subject["n_features"] for subject in result["subjects"]]
+        assert counts == [6, 6]
+        assert all(
+            "s4_" not in key
+            for subject in result["subjects"]
+            for key in subject["features"]
+        )
+
+    def test_one_sided_internal_gap_is_excluded_from_pair(
+        self,
+        monkeypatch,
+    ):
+        """한쪽 s2_w3 coverage 미달 시 pair 양쪽 슬롯을 모두 제외함"""
+        timestamps = pd.date_range("2026-01-01", periods=70, freq="s")
+        base = pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "alpha": np.arange(70, dtype=float),
+            }
+        )
+        frames = {
+            1: base.drop(index=range(60, 66)).reset_index(drop=True),
+            2: base,
+        }
+        monkeypatch.setattr(
+            "server.services.analysis.load_session_data",
+            lambda path: frames[1 if "subject_1_" in str(path) else 2].copy(),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1, 2],
+            stimulus_duration_sec=30,
+            window_size_sec=10,
+            n_stimuli=2,
+            baseline_duration_sec=10,
+            band_cols=["alpha"],
+        )
+        assert "s2_w3_alpha" not in result["subjects"][0]["features"]
+        assert "s2_w3_alpha" in result["subjects"][1]["features"]
+        assert "a_s2_w3_alpha" not in result["pair_features"]
+        assert "b_s2_w3_alpha" not in result["pair_features"]
+
+    def test_no_usable_csv_preserves_partial_response(self, monkeypatch):
+        """usable CSV 0개면 subject별 오류와 pair None을 반환함"""
+        monkeypatch.setattr(
+            "server.services.analysis.find_csv_files",
+            lambda group_id, idx: [],
+        )
+        result = run_full_pipeline(TEST_GROUP_ID, [1, 2])
+        assert [subject["error"] for subject in result["subjects"]] == [
+            "CSV 파일 미발견",
+            "CSV 파일 미발견",
+        ]
+        assert result["pair_features"] is None
+        assert result["synchrony_score"] is None
+
+    def test_subject_contract_error_is_isolated_to_that_subject(
+        self,
+        monkeypatch,
+    ):
+        """한 subject의 timestamp 계약 위반이 다른 subject 분석을 막지 않음"""
+        healthy = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=30, freq="s"),
+                "alpha": np.ones(30),
+            }
+        )
+        broken = pd.DataFrame({"alpha": np.ones(30)})
+        monkeypatch.setattr(
+            "server.services.analysis.load_session_data",
+            lambda path: (
+                broken.copy() if "subject_1_" in str(path) else healthy.copy()
+            ),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1, 2],
+            stimulus_duration_sec=10,
+            window_size_sec=10,
+            n_stimuli=1,
+            baseline_duration_sec=10,
+            band_cols=["alpha"],
+        )
+        failed, healthy_subject = result["subjects"]
+        assert failed["error_code"] == "TIMESTAMP_COLUMN_MISSING"
+        assert healthy_subject["n_features"] == 1
+        assert result["pair_features"] is None
+
+    def test_baseline_mean_uses_complete_observations_only(self):
+        """coverage 판정에서 제외한 불완전 관측 초는 평균에도 포함하지 않음"""
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=10, freq="s"),
+                "alpha": [1.0] * 5 + [100.0] * 5,
+                "beta": [1.0] * 5 + [np.nan] * 5,
+            }
+        )
+        result = compute_baseline(df, ["alpha", "beta"], baseline_duration_sec=10)
+        assert result == {"alpha": 1.0, "beta": 1.0}
+
+    def test_non_positive_baseline_duration_is_rejected(self):
+        """baseline 길이가 0 이하면 계약 오류를 발생시킴"""
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=5, freq="s"),
+                "alpha": np.ones(5),
+            }
+        )
+        with pytest.raises(AnalysisContractError) as exc_info:
+            compute_baseline(df, ["alpha"], baseline_duration_sec=0)
+        assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
+
+    def test_one_usable_csv_uses_its_own_time_range(self, monkeypatch):
+        """usable CSV 1개면 해당 파일 시각으로 분석하고 다른 subject 오류를 유지함"""
+        monkeypatch.setattr(
+            "server.services.analysis.find_csv_files",
+            lambda group_id, idx: (
+                [Path(f"/fake/subject_{idx}_{group_id}.csv")] if idx == 1 else []
+            ),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1, 2],
+            stimulus_duration_sec=20,
+            window_size_sec=10,
+            n_stimuli=1,
+            baseline_duration_sec=10,
+            band_cols=["alpha"],
+        )
+        assert result["subjects"][0]["n_features"] == 2
+        assert result["subjects"][1]["error"] == "CSV 파일 미발견"
+        assert result["pair_features"] is None
+
+    def test_exact_baseline_length_is_valid(self, monkeypatch):
+        """마지막 관측 초 + 1초 배타 경계로 정확한 baseline 길이를 인정함"""
+        exact_df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2026-01-01",
+                    periods=30,
+                    freq="s",
+                ),
+                "alpha": np.ones(30),
+            }
+        )
+        monkeypatch.setattr(
+            "server.services.analysis.load_session_data",
+            lambda path: exact_df.copy(),
+        )
+        result = run_full_pipeline(
+            TEST_GROUP_ID,
+            [1],
+            stimulus_duration_sec=10,
+            window_size_sec=10,
+            n_stimuli=1,
+            baseline_duration_sec=30,
+            band_cols=["alpha"],
+        )
+        assert result["subjects"][0]["baseline"]["alpha"] == 1.0
+        assert result["subjects"][0]["n_features"] == 0
+
+
+class TestCoverageContract:
+    """baseline과 자극 윈도우 coverage 계약을 검증함"""
+
+    @staticmethod
+    def _baseline_frame(observations: int) -> pd.DataFrame:
+        """60초 구간 안에 지정 개수의 완전한 관측 초를 생성함"""
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2026-01-01",
+                    periods=observations,
+                    freq="s",
+                ),
+                "alpha": np.ones(observations),
+                "beta": np.ones(observations),
+            }
+        )
+
+    def test_custom_60_second_baseline_requires_30_observations(self):
+        """가변 60초 baseline의 최소 coverage가 30초로 계산됨"""
+        valid = self._baseline_frame(30)
+        result = compute_baseline(
+            valid,
+            ["alpha", "beta"],
+            baseline_duration_sec=60,
+        )
+        assert result == {"alpha": 1.0, "beta": 1.0}
+
+        invalid = self._baseline_frame(29)
+        with pytest.raises(AnalysisContractError) as exc_info:
+            compute_baseline(
+                invalid,
+                ["alpha", "beta"],
+                baseline_duration_sec=60,
+            )
+        assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
+
+    def test_all_requested_bands_must_be_non_nan_in_same_second(self):
+        """한 초의 요청 대역 중 하나가 NaN이면 완전한 관측 초로 세지 않음"""
+        df = self._baseline_frame(30)
+        df.loc[14:, "beta"] = np.nan
+        with pytest.raises(AnalysisContractError) as exc_info:
+            compute_baseline(
+                df,
+                ["alpha", "beta"],
+                baseline_duration_sec=30,
+            )
+        assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
+
+
+LIVE_GROUP_ID = "6a508a6b1048b553eea41778"
+LIVE_FILES = [
+    (
+        CSV_BASE_DIR / f"subject_{idx}_{LIVE_GROUP_ID}_20260710_150135.csv"
+        if idx == 1
+        else CSV_BASE_DIR / f"subject_{idx}_{LIVE_GROUP_ID}_20260710_150059.csv"
+    )
+    for idx in (1, 2)
+]
+
+
+@pytest.mark.skipif(
+    not all(path.exists() for path in LIVE_FILES),
+    reason="2026-07-10 라이브 CSV가 로컬에 없음",
+)
+def test_live_csv_regression_uses_symmetric_absolute_window_keys():
+    """라이브 CSV에서 시작시각 차이와 무관하게 양쪽 윈도우 키를 정렬함"""
+    result = run_full_pipeline(LIVE_GROUP_ID, [1, 2])
+    feature_keys = [set(subject["features"].keys()) for subject in result["subjects"]]
+    raw_frames = result["dataframes"]
+    start_gap = abs(
+        pd.to_datetime(raw_frames[1]["timestamp"]).min()
+        - pd.to_datetime(raw_frames[2]["timestamp"]).min()
+    ).total_seconds()
+    assert start_gap > 30
+    assert feature_keys[0] == feature_keys[1]
+    assert len(result["pair_features"]) == len(feature_keys[0]) * 2
 
 
 # ──────────────────────────────────────────────
