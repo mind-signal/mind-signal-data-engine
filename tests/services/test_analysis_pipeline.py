@@ -692,6 +692,27 @@ class TestRunFullPipeline:
         result = compute_baseline(df, ["alpha", "beta"], baseline_duration_sec=10)
         assert result == {"alpha": 1.0, "beta": 1.0}
 
+    @pytest.mark.parametrize("bad_value", [np.inf, -np.inf, "n/a"])
+    def test_non_finite_band_value_is_not_a_valid_observation(self, bad_value):
+        """Inf와 수치 변환 실패는 결측으로 처리해 baseline에 섞이지 않음"""
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=30, freq="s"),
+                "alpha": [1.0] * 30,
+            }
+        )
+        df["alpha"] = df["alpha"].astype(object)
+        df.loc[0, "alpha"] = bad_value
+
+        result = compute_baseline(df, ["alpha"], baseline_duration_sec=30)
+        assert result["alpha"] == 1.0
+
+        # 유효 관측이 임계 아래로 떨어지면 계약 오류로 거부함
+        df.loc[1:, "alpha"] = bad_value
+        with pytest.raises(AnalysisContractError) as exc_info:
+            compute_baseline(df, ["alpha"], baseline_duration_sec=30)
+        assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
+
     def test_non_positive_baseline_duration_is_rejected(self):
         """baseline 길이가 0 이하면 계약 오류를 발생시킴"""
         df = pd.DataFrame(
