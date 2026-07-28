@@ -713,6 +713,21 @@ class TestRunFullPipeline:
             compute_baseline(df, ["alpha"], baseline_duration_sec=30)
         assert exc_info.value.error_code == "BASELINE_COVERAGE_INSUFFICIENT"
 
+    def test_numeric_string_band_values_are_averaged_not_concatenated(self):
+        """변환 가능한 숫자 문자열은 수치로 평균함
+
+        마스크는 통과하지만 object Series의 mean()이 문자열을 이어붙여
+        TypeError로 500이 나던 경로임(회귀 방지).
+        """
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=30, freq="s"),
+                "alpha": ["1.0"] * 15 + [3.0] * 15,
+            }
+        )
+        result = compute_baseline(df, ["alpha"], baseline_duration_sec=30)
+        assert result["alpha"] == 2.0
+
     def test_non_positive_baseline_duration_is_rejected(self):
         """baseline 길이가 0 이하면 계약 오류를 발생시킴"""
         df = pd.DataFrame(

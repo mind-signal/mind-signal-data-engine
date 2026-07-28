@@ -433,8 +433,12 @@ def compute_baseline(
             ),
         )
 
-    # coverage 판정과 같은 마스크로 평균을 산출함
-    complete = baseline_df.loc[_finite_mask(baseline_df, band_cols)]
+    # coverage 판정과 같은 마스크에 더해 판정과 같은 수치 변환값으로 평균을 산출함
+    # (object 컬럼의 숫자 문자열은 마스크를 통과하지만 mean()에서 문자열 연결로 터짐)
+    complete = baseline_df.loc[
+        _finite_mask(baseline_df, band_cols),
+        band_cols,
+    ].apply(pd.to_numeric, errors="coerce")
     return {band: float(complete[band].mean()) for band in band_cols}
 
 
