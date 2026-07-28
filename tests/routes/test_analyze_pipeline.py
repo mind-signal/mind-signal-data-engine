@@ -167,6 +167,53 @@ class TestAnalyzePipelineEndpoint:
         assert data["subjects"][1]["error"] == "CSV 파일 미발견"
         assert data["subjects"][1]["features"] is None
 
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_subject_error_code_survives_response_model(
+        self, mock_pipeline, test_client, pipeline_secret_header
+    ):
+        """subject 단위 계약 위반의 error_code가 응답까지 도달함.
+
+        SubjectFeatureResult에 error_code 필드가 없으면 Pydantic이 조용히 버려
+        소비자가 자유 문장으로만 분기해야 했음(회귀 방지).
+        """
+        mock_pipeline.return_value = {
+            "group_id": TEST_GROUP_ID,
+            "subjects": [
+                {
+                    "subject_index": 1,
+                    "baseline": {"alpha": 0.5},
+                    "features": {},
+                    "n_features": 0,
+                },
+                {
+                    "subject_index": 2,
+                    "error": "baseline 관측 초가 최소 coverage에 미달함: 14/15",
+                    "error_code": "BASELINE_COVERAGE_INSUFFICIENT",
+                },
+            ],
+            "pair_features": None,
+            "y_score": None,
+            "synchrony_score": None,
+            "pipeline_params": {
+                "stimulus_duration_sec": 60,
+                "window_size_sec": 10,
+                "n_stimuli": 10,
+                "baseline_duration_sec": 30,
+                "band_cols": ["alpha"],
+                "n_windows_per_stimulus": 6,
+                "total_features_per_subject": 0,
+            },
+            "dataframes": {},
+        }
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={"group_id": TEST_GROUP_ID, "subject_indices": [1, 2]},
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 200
+        subject = response.json()["subjects"][1]
+        assert subject["error_code"] == "BASELINE_COVERAGE_INSUFFICIENT"
+
     def test_invalid_body_missing_group_id(self, test_client, pipeline_secret_header):
         """group_id 미포함 body → 422 validation error 반환함"""
         response = test_client.post(

@@ -97,6 +97,8 @@ class SubjectFeatureResult(BaseModel):
     features: dict[str, float] | None = None
     n_features: int | None = None
     error: str | None = None
+    # 소비자가 자유 문장 대신 코드로 분기하도록 계약 위반 식별자를 함께 실음
+    error_code: str | None = None
 
 
 class PipelineResponse(BaseModel):

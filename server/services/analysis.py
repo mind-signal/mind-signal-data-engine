@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from core.analyzer import MindSignalAnalyzer
@@ -377,19 +378,27 @@ def _resolve_origin(
     return pd.Timestamp(df["timestamp"].min())
 
 
+def _finite_mask(interval_df: pd.DataFrame, band_cols: list[str]) -> pd.Series:
+    """요청 대역이 모두 유한 수치인 행의 불리언 마스크를 반환함
+
+    NaN뿐 아니라 ±Inf와 수치 변환 실패도 결측으로 처리함. Inf를 유효값으로
+    인정하면 baseline이 Inf가 되어 응답 직렬화에서 500으로 이어짐.
+    """
+    if any(band not in interval_df.columns for band in band_cols):
+        return pd.Series(False, index=interval_df.index)
+
+    numeric = interval_df[band_cols].apply(pd.to_numeric, errors="coerce")
+    return numeric.map(np.isfinite).all(axis=1)
+
+
 def _valid_observation_count(
     interval_df: pd.DataFrame,
     band_cols: list[str],
 ) -> int:
-    """요청 대역이 모두 존재하고 non-NaN인 고유 관측 초를 계산함"""
+    """요청 대역이 모두 유한 수치인 고유 관측 초를 계산함"""
     if "timestamp" not in interval_df.columns:
         return 0
-    if any(band not in interval_df.columns for band in band_cols):
-        return 0
-    complete = interval_df.loc[
-        interval_df[band_cols].notna().all(axis=1),
-        "timestamp",
-    ]
+    complete = interval_df.loc[_finite_mask(interval_df, band_cols), "timestamp"]
     return int(complete.nunique())
 
 
@@ -424,8 +433,12 @@ def compute_baseline(
             ),
         )
 
-    # coverage 판정과 같은 완전 관측 행으로 평균을 산출함
-    complete = baseline_df.loc[baseline_df[band_cols].notna().all(axis=1)]
+    # coverage 판정과 같은 마스크에 더해 판정과 같은 수치 변환값으로 평균을 산출함
+    # (object 컬럼의 숫자 문자열은 마스크를 통과하지만 mean()에서 문자열 연결로 터짐)
+    complete = baseline_df.loc[
+        _finite_mask(baseline_df, band_cols),
+        band_cols,
+    ].apply(pd.to_numeric, errors="coerce")
     return {band: float(complete[band].mean()) for band in band_cols}
 
 
