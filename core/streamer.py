@@ -181,7 +181,10 @@ class StreamContinuityTracker:
             if int(interpolated):
                 self.interpolated_samples += 1
         except (TypeError, ValueError, OverflowError):
-            pass
+            # 조용히 삼키면 보간 집계가 왜 비었는지 사후에 알 수 없음
+            anomalies.append(
+                {"kind": "interpolated_invalid", "value": repr(interpolated)}
+            )
 
         return anomalies
 
@@ -561,10 +564,13 @@ class MindSignalStreamer(Cortex):
                 (watchdog 기존 동작 보존). 매 샘플 발생 가능한 경보에만 사용함
         """
         if min_interval_sec:
-            last = self._health_published_at.get(status, 0)
-            if time.time() - last < min_interval_sec:
+            # 수신 간격과 같은 이유로 monotonic 기준임. wall clock이 뒤로 조정되면
+            # time.time() 차이가 음수가 되어 그 폭만큼 경보가 통째로 억제됨.
+            mono = time.monotonic()
+            last = self._health_published_at.get(status)
+            if last is not None and mono - last < min_interval_sec:
                 return
-            self._health_published_at[status] = time.time()
+            self._health_published_at[status] = mono
 
         try:
             self.r.publish(
@@ -659,14 +665,21 @@ class MindSignalStreamer(Cortex):
         # 비유한 MET 값은 반영하지 않고 직전 정상값을 유지함. 그대로 넣으면
         # CSV와 Redis payload에 NaN이 실려 하류 분석이 통째로 깨짐.
         for key, index in self.met_map.items():
-            if index < len(data):
-                if _is_finite_number(data[index]):
-                    self.latest_met[key] = data[index]
-                else:
-                    self._log_continuity(
-                        "met_value_rejected",
-                        {"metric": key, "value": repr(data[index])},
-                    )
+            # 길이 부족을 무음 스킵하면 그 지표가 직전값으로 얼어붙은 채 계속
+            # 기록돼 라벨 매핑이 어긋났다는 사실을 사후에 알 수 없음
+            if index >= len(data):
+                self._log_continuity(
+                    "met_index_out_of_range",
+                    {"metric": key, "index": index, "length": len(data)},
+                )
+                continue
+            if _is_finite_number(data[index]):
+                self.latest_met[key] = data[index]
+            else:
+                self._log_continuity(
+                    "met_value_rejected",
+                    {"metric": key, "value": repr(data[index])},
+                )
 
     def _log_continuity(self, kind: str, payload: dict) -> None:
         """연속성 이벤트를 구조화 로그 1행으로 남김 (종류별 상한 적용).
@@ -783,13 +796,18 @@ class MindSignalStreamer(Cortex):
             # 필터는 대역별 독립 계산이라 샘플이 전부 유한해도 overflow로 한
             # 대역만 비유한이 될 수 있음. 그 행은 쓰지 않고 버림 — coverage 계약이
             # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
-            # 시각도 함께 검사함. 비유한 cortex_time은 아래 fromtimestamp()에서
-            # 예외를 내 콜백 자체를 죽임 (이후 이벤트가 전부 유실됨).
+            # 시각도 함께 검사함. 불량 cortex_time은 fromtimestamp()에서 예외를 내
+            # 콜백 자체를 죽임 (이후 이벤트가 전부 유실됨). 유한성만으로는 부족해서
+            # (1e300은 유한하지만 변환 불가) 실제 변환을 시도해 판정함.
             block_reject = None
+            timestamp = None
             if not all(np.isfinite(v) for v in powers.values()):
                 block_reject = "non_finite_power"
-            elif not _is_finite_number(cortex_time):
-                block_reject = "non_finite_time"
+            else:
+                try:
+                    timestamp = datetime.fromtimestamp(cortex_time)
+                except (TypeError, ValueError, OverflowError, OSError):
+                    block_reject = "non_finite_time"
 
             if block_reject:
                 self.dropped_blocks += 1
@@ -806,10 +824,8 @@ class MindSignalStreamer(Cortex):
                 self.eeg_buffer = []
                 return
 
-            # Cortex 타임스탬프를 문자열로 변환함
-            formatted_time = datetime.fromtimestamp(cortex_time).strftime(
-                "%Y-%m-%d %H:%M:%S.%f"
-            )
+            # Cortex 타임스탬프를 문자열로 변환함 (위 검사에서 변환된 값 재사용)
+            formatted_time = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
 
             # 1. CSV 기록 수행함
             self.writer.writerow(

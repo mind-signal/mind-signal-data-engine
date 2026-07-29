@@ -466,3 +466,84 @@ def test_non_finite_met_keeps_last_good_value(caplog):
         r for r in _continuity_records(caplog) if r["kind"] == "met_value_rejected"
     ]
     assert rejected[0]["metric"] == "focus"
+
+
+# --- CodeRabbit 리뷰 반영분 ---
+
+
+def test_tolerance_boundary_is_exclusive():
+    """정확히 tolerance면 이상 아님, 초과하면 receive_gap임 (부등호 회귀 방지)."""
+    tracker = StreamContinuityTracker()
+    counter, now = _feed(tracker, 5)
+
+    at_edge = tracker.observe(counter, now + TICK, receive_gap_sec=0.5)
+    assert [a["kind"] for a in at_edge] == []
+
+    counter = (counter + 1) % COUNTER_MODULUS
+    over_edge = tracker.observe(counter, now + 2 * TICK, receive_gap_sec=0.5001)
+    assert "receive_gap" in {a["kind"] for a in over_edge}
+
+
+def test_out_of_range_time_is_rejected_before_fromtimestamp(caplog):
+    """유한해도 변환 불가한 시각이 있음 (1e300). 유한성 검사만으로는 못 막음."""
+    s = _mapped_streamer()
+    s.analyzer = SimpleNamespace(
+        fs=1,
+        get_all_powers=lambda _: dict.fromkeys(
+            ("delta", "theta", "alpha", "beta", "gamma"), 1.0
+        ),
+    )
+    s.writer = SimpleNamespace(
+        writerow=lambda row: pytest.fail("변환 불가 시각 행이 CSV에 기록됨")
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.streamer"):
+        s.on_eeg_data_done(data={"eeg": [0, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": 1e300})
+
+    assert s.dropped_blocks == 1
+    dropped = [
+        r for r in _continuity_records(caplog) if r["kind"] == "eeg_block_dropped"
+    ]
+    assert dropped[0]["reason"] == "non_finite_time"
+
+
+def test_met_index_out_of_range_is_logged(caplog):
+    """라벨 매핑이 어긋나 지표가 얼어붙는 것을 무음으로 넘기지 않음."""
+    s = _mapped_streamer()
+    s.met_map = {"focus": 0, "stress": 9}
+    s.latest_met = {"focus": 0.1, "stress": 0.2}
+
+    with caplog.at_level(logging.WARNING, logger="core.streamer"):
+        s.on_new_met_data(data={"met": [0.7]})
+
+    assert s.latest_met == {"focus": 0.7, "stress": 0.2}
+    out_of_range = [
+        r for r in _continuity_records(caplog) if r["kind"] == "met_index_out_of_range"
+    ]
+    assert out_of_range[0]["metric"] == "stress"
+    assert out_of_range[0]["length"] == 1
+
+
+def test_publish_failure_does_not_break_measurement():
+    """Redis 장애로 경보가 못 나가도 샘플 버퍼링은 계속돼야 함."""
+    s = _mapped_streamer()
+
+    def _boom(channel, message):
+        raise RuntimeError("redis down")
+
+    s.r = SimpleNamespace(publish=_boom)
+
+    s.on_eeg_data_done(
+        data={"eeg": [0, 0, float("nan"), 1.0, 1.0, 1.0, 1.0], "time": 1000.0}
+    )
+    s.on_eeg_data_done(data={"eeg": [1, 0, 1.0, 2.0, 3.0, 4.0, 5.0], "time": 1000.01})
+
+    assert s.dropped_samples == 1
+    assert s.eeg_buffer == [[1.0, 2.0, 3.0, 4.0, 5.0]]
+
+
+def test_invalid_interpolated_flag_is_reported():
+    """보간 집계가 왜 비었는지 알 수 있어야 함."""
+    tracker = StreamContinuityTracker()
+    anomalies = tracker.observe(0, 1000.0, interpolated="nope")
+    assert [a["kind"] for a in anomalies] == ["interpolated_invalid"]
