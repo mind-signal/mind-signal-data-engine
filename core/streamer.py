@@ -59,8 +59,19 @@ class StreamContinuityTracker:
     헤드셋 없이 검증 가능하도록 I/O를 하지 않고 값만 받아 이상 목록을 반환함.
     호출부(`MindSignalStreamer.on_eeg_data_done`)가 로그 기록을 담당함.
 
-    ponytail: COUNTER가 정확히 modulus 배수만큼(128, 256, ...) 유실되면 카운터가
-    제자리로 돌아와 counter_gap으로는 안 잡힘. 그 경우는 timestamp_jump가 잡음.
+    판별표 (세 신호의 조합으로 원인을 가름):
+
+    | receive_gap | timestamp_jump | counter_gap | 해석 |
+    |---|---|---|---|
+    | 큼 | 큼 | 있거나 없음 | 스트림 정지 — 이벤트가 실제로 안 옴 |
+    | 정상 | 큼 | 없음 | clock jump — 이벤트는 왔고 시각만 튐 |
+    | 정상 | 정상 | 있음 | 국소 유실 — modulus 미만 샘플 누락 |
+
+    COUNTER는 modulus 순환이라 정확히 128의 배수만큼 유실되면 제자리로 돌아와
+    counter_gap으로 안 잡힘. 128Hz에서 "N초 정지"는 언제나 N*128 샘플이라 이 경우가
+    오히려 대표 시나리오임. 그래서 counter 하나에 의존하지 않고 로컬 수신 간격
+    (receive_gap_sec)을 항상 함께 받아 판별함. counter가 연속인데 수신 간격이나
+    Cortex 시각이 벌어졌으면 full_cycle_loss_suspected로 남김.
     """
 
     def __init__(
@@ -73,7 +84,8 @@ class StreamContinuityTracker:
         self.prev_counter: int | None = None
         self.prev_time: float | None = None
         self.events_seen = 0
-        self.lost_samples = 0
+        # modulus 순환 때문에 확정 유실량이 아니라 하한임 (이름으로 못 박음)
+        self.lost_samples_lower_bound = 0
         self.interpolated_samples = 0
 
     def observe(
@@ -81,6 +93,7 @@ class StreamContinuityTracker:
         counter: object,
         cortex_time: object,
         interpolated: object = 0,
+        receive_gap_sec: float | None = None,
     ) -> list[dict]:
         """EEG 이벤트 1건을 관측하고 발견된 이상 목록 반환함.
 
@@ -88,6 +101,8 @@ class StreamContinuityTracker:
             counter - Cortex EEG COUNTER 값임 (0부터 modulus-1까지 순환)
             cortex_time - Cortex가 보낸 epoch 초임
             interpolated - Cortex INTERPOLATED 플래그임 (1이면 보간 샘플)
+            receive_gap_sec - 직전 이벤트와의 로컬 수신 간격임 (monotonic 기준).
+                None이면 수신 간격 판정을 건너뜀
 
         Returns:
             이상 dict 리스트 반환. 정상이면 빈 리스트임. 각 dict는 `kind` 키를
@@ -95,10 +110,11 @@ class StreamContinuityTracker:
         """
         self.events_seen += 1
         anomalies: list[dict] = []
+        counter_gapped = False
 
         try:
             counter_int = int(counter)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             anomalies.append({"kind": "counter_invalid", "value": repr(counter)})
             counter_int = None
 
@@ -109,21 +125,24 @@ class StreamContinuityTracker:
                 else:
                     missing = (counter_int - self.prev_counter - 1) % self.modulus
                     if missing:
-                        self.lost_samples += missing
+                        counter_gapped = True
+                        self.lost_samples_lower_bound += missing
                         anomalies.append(
                             {
                                 "kind": "counter_gap",
                                 "prev": self.prev_counter,
                                 "counter": counter_int,
-                                "missing": missing,
+                                # 실제 유실량이 아니라 유실량 mod modulus임
+                                "missingModulo": missing,
                             }
                         )
             self.prev_counter = counter_int
 
         try:
             time_float = float(cortex_time)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             time_float = float("nan")
+        time_jumped = False
         if not np.isfinite(time_float):
             anomalies.append({"kind": "time_invalid", "value": repr(cortex_time)})
         else:
@@ -134,15 +153,34 @@ class StreamContinuityTracker:
                         {"kind": "timestamp_backwards", "deltaSec": round(delta, 4)}
                     )
                 elif delta > self.jump_tolerance_sec:
+                    time_jumped = True
                     anomalies.append(
                         {"kind": "timestamp_jump", "deltaSec": round(delta, 4)}
                     )
             self.prev_time = time_float
 
+        receive_gapped = (
+            receive_gap_sec is not None and receive_gap_sec > self.jump_tolerance_sec
+        )
+        if receive_gapped:
+            anomalies.append(
+                {"kind": "receive_gap", "gapSec": round(receive_gap_sec, 4)}
+            )
+
+        # counter는 멀쩡한데 시간이 벌어졌다면 정확히 modulus 배수가 유실된 것임.
+        # 이 조합이 없으면 15초 정지(1920샘플)가 clock jump와 구분되지 않음.
+        if (receive_gapped or time_jumped) and not counter_gapped:
+            anomalies.append(
+                {
+                    "kind": "full_cycle_loss_suspected",
+                    "streamStopped": receive_gapped,
+                }
+            )
+
         try:
             if int(interpolated):
                 self.interpolated_samples += 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
 
         return anomalies
@@ -151,9 +189,18 @@ class StreamContinuityTracker:
         """종료 시점 누적 집계 반환함."""
         return {
             "eegEvents": self.events_seen,
-            "lostSamples": self.lost_samples,
+            # 확정값 아님 — modulus 순환분은 세지 못함
+            "lostSamplesLowerBound": self.lost_samples_lower_bound,
             "interpolatedSamples": self.interpolated_samples,
         }
+
+
+def _is_finite_number(value: object) -> bool:
+    """유한한 수치로 변환 가능한 값인지 판정함."""
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def coerce_eeg_channels(
@@ -315,6 +362,7 @@ class MindSignalStreamer(Cortex):
         self.dropped_blocks = 0
         self._continuity_log_counts: dict[str, int] = {}
         self._health_published_at: dict[str, float] = {}
+        self._last_event_monotonic: float | None = None
         self._eeg_stale = False
         self._met_stale = False
         self.latest_met = {
@@ -449,8 +497,12 @@ class MindSignalStreamer(Cortex):
                 labels.index("INTERPOLATED") if "INTERPOLATED" in labels else None
             )
             if self.counter_index is None:
-                print(
-                    f"[WARN] EEG COUNTER 라벨 미발견 — 연속성 계측 비활성 (labels={labels})"
+                # print가 아니라 logger를 씀. Windows 기본 콘솔 인코딩(CP949)에서
+                # print는 UnicodeEncodeError로 콜백을 죽일 수 있고, 그러면
+                # "계측만 끄고 측정은 계속"이라는 이 경로의 의도가 깨짐.
+                logger.warning(
+                    "EEG COUNTER 라벨 미발견으로 연속성 계측 비활성함 "
+                    f"(labels={labels}, subject {self.subject_index})"
                 )
 
     def on_create_session_done(self, *args, **kwargs):
@@ -604,9 +656,17 @@ class MindSignalStreamer(Cortex):
                 "met_recovered", {"silentSec": round(now - self.last_met_time, 1)}
             )
         self.last_met_time = now
+        # 비유한 MET 값은 반영하지 않고 직전 정상값을 유지함. 그대로 넣으면
+        # CSV와 Redis payload에 NaN이 실려 하류 분석이 통째로 깨짐.
         for key, index in self.met_map.items():
             if index < len(data):
-                self.latest_met[key] = data[index]
+                if _is_finite_number(data[index]):
+                    self.latest_met[key] = data[index]
+                else:
+                    self._log_continuity(
+                        "met_value_rejected",
+                        {"metric": key, "value": repr(data[index])},
+                    )
 
     def _log_continuity(self, kind: str, payload: dict) -> None:
         """연속성 이벤트를 구조화 로그 1행으로 남김 (종류별 상한 적용).
@@ -631,6 +691,20 @@ class MindSignalStreamer(Cortex):
             record["logCapReached"] = True
         logger.warning("[CONTINUITY] %s", json.dumps(record))
 
+    def _discard_partial_buffer(self, reason: str) -> None:
+        """모으던 부분 버퍼를 버림 (연속되지 않은 구간의 이어붙임 방지).
+
+        Args:
+            reason - 폐기 사유임 (수신 공백 또는 불량 샘플 사유)
+        """
+        if not self.eeg_buffer:
+            return
+        self._log_continuity(
+            "partial_buffer_discarded",
+            {"reason": reason, "samples": len(self.eeg_buffer)},
+        )
+        self.eeg_buffer = []
+
     def on_eeg_data_done(self, *args, **kwargs):
         """EEG 샘플을 버퍼링하고 1초(128샘플) 도달 시 대역 파워 계산 수행함"""
         data = kwargs.get("data")
@@ -641,6 +715,14 @@ class MindSignalStreamer(Cortex):
         now = time.time()
         silent_sec = now - self.last_data_time
         self.last_data_time = now
+
+        # 로컬 수신 간격은 monotonic으로 잼. wall clock이 조정돼도 흔들리지 않아야
+        # "이벤트가 안 온 것"과 "Cortex 시각만 튄 것"을 가를 수 있음.
+        mono = time.monotonic()
+        receive_gap = None
+        if self._last_event_monotonic is not None:
+            receive_gap = mono - self._last_event_monotonic
+        self._last_event_monotonic = mono
 
         # stale 복구 엣지 기록함. watchdog은 정지 시작만 알리고 복구는 알리지
         # 않아서, 다음 공백의 지속 시간을 사후에 알 수 없었음.
@@ -656,13 +738,19 @@ class MindSignalStreamer(Cortex):
             ):
                 interpolated = eeg_row[self.interpolated_index]
             for anomaly in self.continuity.observe(
-                eeg_row[self.counter_index], cortex_time, interpolated
+                eeg_row[self.counter_index], cortex_time, interpolated, receive_gap
             ):
                 self._log_continuity(anomaly.pop("kind"), anomaly)
 
         # 채널 인덱스가 아직 매핑되지 않은 경우 대기함
         if not self.eeg_channel_indices:
             return
+
+        # 수신이 끊겼다가 재개되면 남은 부분 버퍼를 버림. 그대로 두면 15초 떨어진
+        # 두 구간이 하나의 128샘플 블록으로 이어붙어 연속 신호가 아닌 것을
+        # 연속으로 간주해 FFT를 돌리게 됨.
+        if receive_gap is not None and receive_gap > TIMESTAMP_JUMP_TOLERANCE_SEC:
+            self._discard_partial_buffer("receive_gap")
 
         # 메타데이터를 제외한 순수 뇌파 채널 데이터만 추출하여 버퍼에 추가함.
         # 불량 샘플은 버퍼에 넣지 않고 버림 — 하나만 섞여도 128샘플 평균이
@@ -676,6 +764,8 @@ class MindSignalStreamer(Cortex):
             self._publish_health(
                 "invalid_data", min_interval_sec=HEALTH_REPUBLISH_INTERVAL_SEC
             )
+            # 불량 샘플 전후를 이어붙이지 않도록 부분 버퍼도 함께 버림
+            self._discard_partial_buffer(reject_reason)
             return
         self.eeg_buffer.append(channel_data)
 
@@ -693,12 +783,20 @@ class MindSignalStreamer(Cortex):
             # 필터는 대역별 독립 계산이라 샘플이 전부 유한해도 overflow로 한
             # 대역만 비유한이 될 수 있음. 그 행은 쓰지 않고 버림 — coverage 계약이
             # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
+            # 시각도 함께 검사함. 비유한 cortex_time은 아래 fromtimestamp()에서
+            # 예외를 내 콜백 자체를 죽임 (이후 이벤트가 전부 유실됨).
+            block_reject = None
             if not all(np.isfinite(v) for v in powers.values()):
+                block_reject = "non_finite_power"
+            elif not _is_finite_number(cortex_time):
+                block_reject = "non_finite_time"
+
+            if block_reject:
                 self.dropped_blocks += 1
                 self._log_continuity(
                     "eeg_block_dropped",
                     {
-                        "reason": "non_finite_power",
+                        "reason": block_reject,
                         "bands": [k for k, v in powers.items() if not np.isfinite(v)],
                     },
                 )

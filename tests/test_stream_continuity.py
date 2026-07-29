@@ -40,7 +40,7 @@ def _feed(tracker, count, start_counter=0, start_time=1000.0):
 def test_normal_stream_reports_nothing():
     tracker = StreamContinuityTracker()
     _feed(tracker, 300)
-    assert tracker.lost_samples == 0
+    assert tracker.lost_samples_lower_bound == 0
     assert tracker.events_seen == 300
 
 
@@ -53,8 +53,8 @@ def test_counter_gap_reports_missing_sample_count():
 
     kinds = {a["kind"] for a in anomalies}
     assert kinds == {"counter_gap"}
-    assert anomalies[0]["missing"] == 5
-    assert tracker.lost_samples == 5
+    assert anomalies[0]["missingModulo"] == 5
+    assert tracker.lost_samples_lower_bound == 5
 
 
 def test_counter_gap_across_wrap_boundary():
@@ -63,7 +63,7 @@ def test_counter_gap_across_wrap_boundary():
     tracker.observe(127, 1000.0)
     anomalies = tracker.observe(2, 1000.0 + TICK)
     assert anomalies[0]["kind"] == "counter_gap"
-    assert anomalies[0]["missing"] == 2
+    assert anomalies[0]["missingModulo"] == 2
 
 
 def test_repeated_counter_is_distinct_from_gap():
@@ -71,19 +71,61 @@ def test_repeated_counter_is_distinct_from_gap():
     tracker.observe(7, 1000.0)
     anomalies = tracker.observe(7, 1000.0 + TICK)
     assert [a["kind"] for a in anomalies] == ["counter_repeat"]
-    assert tracker.lost_samples == 0
+    assert tracker.lost_samples_lower_bound == 0
 
 
-def test_timestamp_jump_reported_without_counter_gap():
-    """카운터는 연속인데 시각만 튀는 경우 — clock jump 판별용."""
+def test_clock_jump_signature_has_no_receive_gap():
+    """이벤트는 정상 수신인데 Cortex 시각만 튄 경우임 — 스트림 정지가 아님."""
     tracker = StreamContinuityTracker()
     counter, now = _feed(tracker, 10)
 
-    anomalies = tracker.observe(counter, now + 3.0)
+    # _feed는 다음에 올 counter를 돌려주므로 그대로 넣으면 카운터는 연속임
+    anomalies = tracker.observe(counter, now + 3.0, receive_gap_sec=TICK)
 
-    assert [a["kind"] for a in anomalies] == ["timestamp_jump"]
-    assert anomalies[0]["deltaSec"] == pytest.approx(3.0, abs=0.01)
-    assert tracker.lost_samples == 0
+    kinds = {a["kind"] for a in anomalies}
+    assert kinds == {"timestamp_jump", "full_cycle_loss_suspected"}
+    jump = next(a for a in anomalies if a["kind"] == "timestamp_jump")
+    assert jump["deltaSec"] == pytest.approx(3.0, abs=0.01)
+    suspected = next(a for a in anomalies if a["kind"] == "full_cycle_loss_suspected")
+    assert suspected["streamStopped"] is False
+
+
+def test_stream_stop_signature_has_receive_gap():
+    """15초 정지는 정확히 1920샘플이라 counter가 제자리로 돌아옴.
+
+    codex 교차검토 지적(High): counter_gap만 보면 이 시나리오가 clock jump와
+    구분되지 않는다. 로컬 수신 간격이 유일한 판별 신호다.
+    """
+    tracker = StreamContinuityTracker()
+    counter, now = _feed(tracker, 10)
+
+    # 15초 정지 후 복구 — 유실 1920 = 128 * 15라 counter는 연속으로 보임
+    anomalies = tracker.observe(counter, now + 15.0, receive_gap_sec=15.0)
+
+    kinds = {a["kind"] for a in anomalies}
+    assert kinds == {"timestamp_jump", "receive_gap", "full_cycle_loss_suspected"}
+    suspected = next(a for a in anomalies if a["kind"] == "full_cycle_loss_suspected")
+    assert suspected["streamStopped"] is True
+
+
+@pytest.mark.parametrize("lost", [127, 128, 133, 1920])
+def test_full_cycle_losses_are_never_silently_normal(lost):
+    """유실량이 modulus 배수든 아니든 어떤 이상은 반드시 남음."""
+    tracker = StreamContinuityTracker()
+    counter, now = _feed(tracker, 10)
+
+    gap_sec = lost * TICK
+    anomalies = tracker.observe(
+        (counter + lost) % COUNTER_MODULUS, now + gap_sec, receive_gap_sec=gap_sec
+    )
+
+    assert anomalies, f"{lost}샘플 유실이 아무 이상도 남기지 않음"
+    kinds = {a["kind"] for a in anomalies}
+    # 어느 경우든 수신 공백이 남아 스트림 정지로 판별 가능함
+    assert "receive_gap" in kinds
+    if lost % COUNTER_MODULUS == 0:
+        assert "counter_gap" not in kinds
+        assert "full_cycle_loss_suspected" in kinds
 
 
 def test_counter_gap_and_timestamp_jump_reported_together():
@@ -93,6 +135,7 @@ def test_counter_gap_and_timestamp_jump_reported_together():
 
     anomalies = tracker.observe((counter + 20) % COUNTER_MODULUS, now + 2.0)
 
+    # counter_gap이 유실을 확정하므로 full_cycle_loss_suspected는 붙지 않음
     assert {a["kind"] for a in anomalies} == {"counter_gap", "timestamp_jump"}
 
 
@@ -138,6 +181,7 @@ def _bare_streamer():
     s.dropped_blocks = 0
     s._continuity_log_counts = {}
     s._health_published_at = {}
+    s._last_event_monotonic = None
     s._eeg_stale = False
     s._met_stale = False
     s.channel = "mind-signal:g1:subject:1"
@@ -192,7 +236,7 @@ def test_eeg_event_logs_counter_gap(caplog):
 
     records = _continuity_records(caplog)
     assert [r["kind"] for r in records] == ["counter_gap"]
-    assert records[0]["missing"] == 3
+    assert records[0]["missingModulo"] == 3
     assert records[0]["subjectIndex"] == 1
 
 
@@ -336,3 +380,89 @@ def test_non_finite_power_block_is_not_written_to_csv(caplog):
     ]
     assert dropped[0]["bands"] == ["theta"]
     assert s.r.published[0]["status"] == "invalid_data"
+
+
+# --- codex 교차검토 반영분 ---
+
+
+def test_bad_sample_discards_partial_buffer(caplog):
+    """불량 샘플 전후가 한 블록으로 이어붙지 않음 (codex Medium 2)."""
+    s = _mapped_streamer()
+    s.on_eeg_data_done(data={"eeg": [0, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": 1000.0})
+    assert len(s.eeg_buffer) == 1
+
+    with caplog.at_level(logging.WARNING, logger="core.streamer"):
+        s.on_eeg_data_done(
+            data={"eeg": [1, 0, float("nan"), 1.0, 1.0, 1.0, 1.0], "time": 1000.01}
+        )
+
+    assert s.eeg_buffer == []
+    discarded = [
+        r
+        for r in _continuity_records(caplog)
+        if r["kind"] == "partial_buffer_discarded"
+    ]
+    assert discarded[0]["samples"] == 1
+
+
+def test_receive_gap_discards_partial_buffer(monkeypatch):
+    """수신이 끊겼다 재개되면 떨어진 두 구간을 이어붙이지 않음."""
+    s = _mapped_streamer()
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    s.on_eeg_data_done(data={"eeg": [0, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": 1000.0})
+    s.on_eeg_data_done(data={"eeg": [1, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": 1000.01})
+    assert len(s.eeg_buffer) == 2
+
+    clock[0] += 15.0  # 15초 수신 공백 후 복구됨
+    s.on_eeg_data_done(data={"eeg": [2, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": 1015.0})
+
+    # 공백 이전 2샘플은 버려지고 새 구간만 남음
+    assert len(s.eeg_buffer) == 1
+
+
+def test_non_finite_time_does_not_kill_callback(caplog):
+    """비유한 cortex_time은 fromtimestamp에서 콜백을 죽임 (codex Medium 3)."""
+    s = _mapped_streamer()
+    s.analyzer = SimpleNamespace(
+        fs=1,
+        get_all_powers=lambda _: {
+            "delta": 1.0,
+            "theta": 1.0,
+            "alpha": 1.0,
+            "beta": 1.0,
+            "gamma": 1.0,
+        },
+    )
+    s.writer = SimpleNamespace(
+        writerow=lambda row: pytest.fail("비유한 시각 행이 CSV에 기록됨")
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.streamer"):
+        s.on_eeg_data_done(
+            data={"eeg": [0, 0, 1.0, 1.0, 1.0, 1.0, 1.0], "time": float("nan")}
+        )
+
+    assert s.dropped_blocks == 1
+    assert s.csv_rows_written == 0
+    dropped = [
+        r for r in _continuity_records(caplog) if r["kind"] == "eeg_block_dropped"
+    ]
+    assert dropped[0]["reason"] == "non_finite_time"
+
+
+def test_non_finite_met_keeps_last_good_value(caplog):
+    """NaN MET을 그대로 저장하면 CSV와 Redis payload가 오염됨 (codex Medium 3)."""
+    s = _mapped_streamer()
+    s.met_map = {"focus": 0, "stress": 1}
+    s.latest_met = {"focus": 0.4, "stress": 0.2}
+
+    with caplog.at_level(logging.WARNING, logger="core.streamer"):
+        s.on_new_met_data(data={"met": [float("nan"), 0.9]})
+
+    assert s.latest_met == {"focus": 0.4, "stress": 0.9}
+    rejected = [
+        r for r in _continuity_records(caplog) if r["kind"] == "met_value_rejected"
+    ]
+    assert rejected[0]["metric"] == "focus"
