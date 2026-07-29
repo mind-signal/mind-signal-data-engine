@@ -41,6 +41,154 @@ MET_LABEL_CANDIDATES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Cortex EEG COUNTER는 0부터 127까지 순환하는 샘플 카운터임 (128Hz라 1초에 한 바퀴).
+COUNTER_MODULUS = 128
+# 128Hz 기준 정상 샘플 간격은 약 0.0078초임. 이보다 크게 벌어지면 이벤트 유실이나
+# clock jump로 판정함. 0.5초는 CSV 1행(1초) 절반이라 행 단위 결측 직전에 잡힘.
+TIMESTAMP_JUMP_TOLERANCE_SEC = 0.5
+# 같은 종류의 이상을 무한히 찍지 않기 위한 상한임. 초과분은 개수만 세어 종료 요약에 남김.
+CONTINUITY_LOG_CAP_PER_KIND = 20
+# 매 샘플 발생 가능한 경보의 재발행 최소 간격임. BE도 같은 status 연속 수신을
+# 억제하지만(stream-health.service.ts), Redis에 초당 128건을 던질 이유가 없음.
+HEALTH_REPUBLISH_INTERVAL_SEC = 10
+
+
+class StreamContinuityTracker:
+    """Cortex EEG 이벤트의 연속성 이상을 판정하는 순수 상태기임.
+
+    헤드셋 없이 검증 가능하도록 I/O를 하지 않고 값만 받아 이상 목록을 반환함.
+    호출부(`MindSignalStreamer.on_eeg_data_done`)가 로그 기록을 담당함.
+
+    ponytail: COUNTER가 정확히 modulus 배수만큼(128, 256, ...) 유실되면 카운터가
+    제자리로 돌아와 counter_gap으로는 안 잡힘. 그 경우는 timestamp_jump가 잡음.
+    """
+
+    def __init__(
+        self,
+        modulus: int = COUNTER_MODULUS,
+        jump_tolerance_sec: float = TIMESTAMP_JUMP_TOLERANCE_SEC,
+    ):
+        self.modulus = modulus
+        self.jump_tolerance_sec = jump_tolerance_sec
+        self.prev_counter: int | None = None
+        self.prev_time: float | None = None
+        self.events_seen = 0
+        self.lost_samples = 0
+        self.interpolated_samples = 0
+
+    def observe(
+        self,
+        counter: object,
+        cortex_time: object,
+        interpolated: object = 0,
+    ) -> list[dict]:
+        """EEG 이벤트 1건을 관측하고 발견된 이상 목록 반환함.
+
+        Args:
+            counter - Cortex EEG COUNTER 값임 (0부터 modulus-1까지 순환)
+            cortex_time - Cortex가 보낸 epoch 초임
+            interpolated - Cortex INTERPOLATED 플래그임 (1이면 보간 샘플)
+
+        Returns:
+            이상 dict 리스트 반환. 정상이면 빈 리스트임. 각 dict는 `kind` 키를
+            가지며 종류별로 부가 필드가 붙음.
+        """
+        self.events_seen += 1
+        anomalies: list[dict] = []
+
+        try:
+            counter_int = int(counter)
+        except (TypeError, ValueError):
+            anomalies.append({"kind": "counter_invalid", "value": repr(counter)})
+            counter_int = None
+
+        if counter_int is not None:
+            if self.prev_counter is not None:
+                if counter_int == self.prev_counter:
+                    anomalies.append({"kind": "counter_repeat", "counter": counter_int})
+                else:
+                    missing = (counter_int - self.prev_counter - 1) % self.modulus
+                    if missing:
+                        self.lost_samples += missing
+                        anomalies.append(
+                            {
+                                "kind": "counter_gap",
+                                "prev": self.prev_counter,
+                                "counter": counter_int,
+                                "missing": missing,
+                            }
+                        )
+            self.prev_counter = counter_int
+
+        try:
+            time_float = float(cortex_time)
+        except (TypeError, ValueError):
+            time_float = float("nan")
+        if not np.isfinite(time_float):
+            anomalies.append({"kind": "time_invalid", "value": repr(cortex_time)})
+        else:
+            if self.prev_time is not None:
+                delta = time_float - self.prev_time
+                if delta < 0:
+                    anomalies.append(
+                        {"kind": "timestamp_backwards", "deltaSec": round(delta, 4)}
+                    )
+                elif delta > self.jump_tolerance_sec:
+                    anomalies.append(
+                        {"kind": "timestamp_jump", "deltaSec": round(delta, 4)}
+                    )
+            self.prev_time = time_float
+
+        try:
+            if int(interpolated):
+                self.interpolated_samples += 1
+        except (TypeError, ValueError):
+            pass
+
+        return anomalies
+
+    def summary(self) -> dict:
+        """종료 시점 누적 집계 반환함."""
+        return {
+            "eegEvents": self.events_seen,
+            "lostSamples": self.lost_samples,
+            "interpolatedSamples": self.interpolated_samples,
+        }
+
+
+def coerce_eeg_channels(
+    eeg_row: list, indices: list[int]
+) -> tuple[list[float] | None, str | None]:
+    """EEG 행에서 대상 채널만 float로 변환하고 유효성 검사함.
+
+    PR #38이 분석 단계(하류)에 넣은 유한성 방어를 CSV 생성층까지 이은 것임.
+    비유한 값이 버퍼에 들어가면 128샘플 평균 전체가 오염돼 그 초의 5대역이
+    통째로 무효가 되므로, 샘플 단위에서 걸러냄.
+
+    Args:
+        eeg_row - Cortex가 보낸 EEG 행임 (메타 채널 포함)
+        indices - 추출할 뇌파 채널 인덱스 목록임
+
+    Returns:
+        성공 시 (값 리스트, None), 실패 시 (None, 사유) 반환.
+    """
+    if not indices:
+        return None, "no_channel_mapping"
+    if max(indices) >= len(eeg_row):
+        return None, "row_too_short"
+
+    values: list[float] = []
+    for i in indices:
+        try:
+            value = float(eeg_row[i])
+        except (TypeError, ValueError):
+            return None, "non_numeric"
+        if not np.isfinite(value):
+            return None, "non_finite"
+        values.append(value)
+    return values, None
+
+
 def build_met_map(labels: list[str]) -> dict[str, int]:
     """Cortex met 라벨 배열에서 지표별 인덱스 매핑 생성함.
 
@@ -156,6 +304,19 @@ class MindSignalStreamer(Cortex):
         self.met_map = {}
         self.eeg_channel_indices = []
         self.eeg_buffer = []
+
+        # 스트림 연속성 계측 상태 초기화함 (P0-1). COUNTER와 INTERPOLATED 인덱스는
+        # eeg 라벨 이벤트 수신 시 채워짐.
+        self.counter_index: int | None = None
+        self.interpolated_index: int | None = None
+        self.continuity = StreamContinuityTracker()
+        self.csv_rows_written = 0
+        self.dropped_samples = 0
+        self.dropped_blocks = 0
+        self._continuity_log_counts: dict[str, int] = {}
+        self._health_published_at: dict[str, float] = {}
+        self._eeg_stale = False
+        self._met_stale = False
         self.latest_met = {
             "focus": 0,
             "engagement": 0,
@@ -279,6 +440,19 @@ class MindSignalStreamer(Cortex):
             ]
             print(f"EEG 채널 인덱스 매핑 완료됨: {self.eeg_channel_indices}")
 
+            # 연속성 계측용 메타 채널 인덱스 확보함. 없으면 계측만 비활성되고
+            # 측정 자체는 그대로 진행함.
+            self.counter_index = (
+                labels.index("COUNTER") if "COUNTER" in labels else None
+            )
+            self.interpolated_index = (
+                labels.index("INTERPOLATED") if "INTERPOLATED" in labels else None
+            )
+            if self.counter_index is None:
+                print(
+                    f"[WARN] EEG COUNTER 라벨 미발견 — 연속성 계측 비활성 (labels={labels})"
+                )
+
     def on_create_session_done(self, *args, **kwargs):
         print(f"세션 연결 성공하였음. {self.duration_min}분 측정을 시작함.")
 
@@ -322,29 +496,46 @@ class MindSignalStreamer(Cortex):
         t = threading.Thread(target=_check, daemon=True)
         t.start()
 
+    def _publish_health(
+        self, status: str, elapsed: float = 0, min_interval_sec: float = 0
+    ) -> None:
+        """headset_status 경보를 Redis로 발행함 (watchdog과 불량 블록 공용).
+
+        Args:
+            status - DE 상태 문자열임. BE는 disconnected만 보존하고 나머지를
+                stale로 정규화함 (`stream-health.service.ts`)
+            elapsed - 무신호 경과 초임
+            min_interval_sec - 같은 status 재발행 최소 간격임. 0이면 제한 없음
+                (watchdog 기존 동작 보존). 매 샘플 발생 가능한 경보에만 사용함
+        """
+        if min_interval_sec:
+            last = self._health_published_at.get(status, 0)
+            if time.time() - last < min_interval_sec:
+                return
+            self._health_published_at[status] = time.time()
+
+        try:
+            self.r.publish(
+                self.channel,
+                json.dumps(
+                    {
+                        "type": "headset_status",
+                        "status": status,
+                        "subjectIndex": self.subject_index,
+                        "groupId": self.group_id,
+                        "silentSeconds": round(elapsed),
+                    }
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — 경보 발행 실패가 측정을 깨지 않음
+            # 조용히 삼키면 경보 자체가 사라진 걸 아무도 모름 (CodeRabbit PR #36)
+            logger.warning(
+                f"[WATCHDOG] 상태 발행 실패 ({status}): {exc}"
+                f" (subject {self.subject_index})"
+            )
+
     def _start_watchdog(self):
         """무데이터 감지 watchdog 스레드 시작함"""
-
-        def _publish_status(status: str, elapsed: float) -> None:
-            try:
-                self.r.publish(
-                    self.channel,
-                    json.dumps(
-                        {
-                            "type": "headset_status",
-                            "status": status,
-                            "subjectIndex": self.subject_index,
-                            "groupId": self.group_id,
-                            "silentSeconds": round(elapsed),
-                        }
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001 — 경보 발행 실패가 측정을 깨지 않음
-                # 조용히 삼키면 경보 자체가 사라진 걸 아무도 모름 (CodeRabbit PR #36)
-                logger.warning(
-                    f"[WATCHDOG] 상태 발행 실패 ({status}): {exc}"
-                    f" (subject {self.subject_index})"
-                )
 
         def _check():
             while self._watchdog_active:
@@ -356,7 +547,13 @@ class MindSignalStreamer(Cortex):
                         f"[WATCHDOG] {eeg_elapsed:.0f}초간 EEG 데이터 미수신"
                         f" (subject {self.subject_index})"
                     )
-                    _publish_status("no_data", eeg_elapsed)
+                    self._publish_health("no_data", eeg_elapsed)
+                    # 정지 시작 1회만 구조화 로그로 남김 (복구는 on_eeg_data_done에서)
+                    if not self._eeg_stale:
+                        self._eeg_stale = True
+                        self._log_continuity(
+                            "eeg_stale_start", {"silentSec": round(eeg_elapsed, 1)}
+                        )
 
                 # MET는 EEG와 별개 스트림임. EEG만 살아 있고 MET가 죽으면
                 # latest_met이 마지막 값을 무한 반복해 CSV에 얼어붙은 지표가
@@ -368,7 +565,12 @@ class MindSignalStreamer(Cortex):
                         f"[WATCHDOG] {met_elapsed:.0f}초간 MET 지표 미수신"
                         f" (subject {self.subject_index})"
                     )
-                    _publish_status("metrics_stale", met_elapsed)
+                    self._publish_health("metrics_stale", met_elapsed)
+                    if not self._met_stale:
+                        self._met_stale = True
+                        self._log_continuity(
+                            "met_stale_start", {"silentSec": round(met_elapsed, 1)}
+                        )
 
                 time.sleep(10)
 
@@ -395,10 +597,39 @@ class MindSignalStreamer(Cortex):
         """수신된 MET 배열에서 매핑된 점수 값만 추출함"""
         data = kwargs.get("data")["met"]
         # MET 전용 watchdog 타임스탬프 갱신함 (EEG와 독립)
-        self.last_met_time = time.time()
+        now = time.time()
+        if self._met_stale:
+            self._met_stale = False
+            self._log_continuity(
+                "met_recovered", {"silentSec": round(now - self.last_met_time, 1)}
+            )
+        self.last_met_time = now
         for key, index in self.met_map.items():
             if index < len(data):
                 self.latest_met[key] = data[index]
+
+    def _log_continuity(self, kind: str, payload: dict) -> None:
+        """연속성 이벤트를 구조화 로그 1행으로 남김 (종류별 상한 적용).
+
+        Args:
+            kind - 이벤트 종류 키임 (counter_gap, timestamp_jump 등)
+            payload - 종류별 부가 필드임
+        """
+        seen = self._continuity_log_counts.get(kind, 0) + 1
+        self._continuity_log_counts[kind] = seen
+        if seen > CONTINUITY_LOG_CAP_PER_KIND:
+            return
+
+        record = {
+            "kind": kind,
+            "groupId": self.group_id,
+            "subjectIndex": self.subject_index,
+            "elapsedSec": round(time.time() - self.start_time, 3),
+            **payload,
+        }
+        if seen == CONTINUITY_LOG_CAP_PER_KIND:
+            record["logCapReached"] = True
+        logger.warning("[CONTINUITY] %s", json.dumps(record))
 
     def on_eeg_data_done(self, *args, **kwargs):
         """EEG 샘플을 버퍼링하고 1초(128샘플) 도달 시 대역 파워 계산 수행함"""
@@ -407,14 +638,45 @@ class MindSignalStreamer(Cortex):
         cortex_time = data["time"]
 
         # watchdog 타임스탬프 갱신함
-        self.last_data_time = time.time()
+        now = time.time()
+        silent_sec = now - self.last_data_time
+        self.last_data_time = now
+
+        # stale 복구 엣지 기록함. watchdog은 정지 시작만 알리고 복구는 알리지
+        # 않아서, 다음 공백의 지속 시간을 사후에 알 수 없었음.
+        if self._eeg_stale:
+            self._eeg_stale = False
+            self._log_continuity("eeg_recovered", {"silentSec": round(silent_sec, 1)})
+
+        # 연속성 관측함 (COUNTER 라벨이 매핑된 경우에만)
+        if self.counter_index is not None and self.counter_index < len(eeg_row):
+            interpolated = 0
+            if self.interpolated_index is not None and self.interpolated_index < len(
+                eeg_row
+            ):
+                interpolated = eeg_row[self.interpolated_index]
+            for anomaly in self.continuity.observe(
+                eeg_row[self.counter_index], cortex_time, interpolated
+            ):
+                self._log_continuity(anomaly.pop("kind"), anomaly)
 
         # 채널 인덱스가 아직 매핑되지 않은 경우 대기함
         if not self.eeg_channel_indices:
             return
 
-        # 메타데이터를 제외한 순수 뇌파 채널 데이터만 추출하여 버퍼에 추가함
-        channel_data = [eeg_row[i] for i in self.eeg_channel_indices]
+        # 메타데이터를 제외한 순수 뇌파 채널 데이터만 추출하여 버퍼에 추가함.
+        # 불량 샘플은 버퍼에 넣지 않고 버림 — 하나만 섞여도 128샘플 평균이
+        # 오염돼 그 초의 5대역이 통째로 무효가 됨.
+        channel_data, reject_reason = coerce_eeg_channels(
+            eeg_row, self.eeg_channel_indices
+        )
+        if reject_reason:
+            self.dropped_samples += 1
+            self._log_continuity("eeg_sample_dropped", {"reason": reject_reason})
+            self._publish_health(
+                "invalid_data", min_interval_sec=HEALTH_REPUBLISH_INTERVAL_SEC
+            )
+            return
         self.eeg_buffer.append(channel_data)
 
         # 버퍼에 1초 분량(128 샘플)의 데이터가 모였을 때 분석 실행함
@@ -427,6 +689,24 @@ class MindSignalStreamer(Cortex):
 
             # 시계열 데이터를 필터에 통과시켜 파워 대역 계산함
             powers = self.analyzer.get_all_powers(mean_eeg_time_series)
+
+            # 필터는 대역별 독립 계산이라 샘플이 전부 유한해도 overflow로 한
+            # 대역만 비유한이 될 수 있음. 그 행은 쓰지 않고 버림 — coverage 계약이
+            # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
+            if not all(np.isfinite(v) for v in powers.values()):
+                self.dropped_blocks += 1
+                self._log_continuity(
+                    "eeg_block_dropped",
+                    {
+                        "reason": "non_finite_power",
+                        "bands": [k for k, v in powers.items() if not np.isfinite(v)],
+                    },
+                )
+                self._publish_health(
+                    "invalid_data", min_interval_sec=HEALTH_REPUBLISH_INTERVAL_SEC
+                )
+                self.eeg_buffer = []
+                return
 
             # Cortex 타임스탬프를 문자열로 변환함
             formatted_time = datetime.fromtimestamp(cortex_time).strftime(
@@ -451,6 +731,7 @@ class MindSignalStreamer(Cortex):
                 ]
             )
             self.csv_file.flush()
+            self.csv_rows_written += 1
 
             # 2. alignment_location에 따라 proxy 또는 Redis로 샘플 발행함
             if self.alignment_location == "proxy":
@@ -538,6 +819,25 @@ class MindSignalStreamer(Cortex):
     def on_close(self, *args, **kwargs):
         self._watchdog_active = False
         elapsed = time.time() - self.start_time if hasattr(self, "start_time") else 0
+
+        # 총 EEG 이벤트 대비 CSV 행 수를 남김. 128 이벤트당 1행이 정상이라
+        # 비율이 어긋나면 이벤트 유실인지 버퍼 미충족인지 사후 판별 가능함.
+        if hasattr(self, "continuity"):
+            summary = self.continuity.summary()
+            summary.update(
+                {
+                    "kind": "session_summary",
+                    "groupId": self.group_id,
+                    "subjectIndex": self.subject_index,
+                    "elapsedSec": round(elapsed, 1),
+                    "csvRows": self.csv_rows_written,
+                    "droppedSamples": self.dropped_samples,
+                    "droppedBlocks": self.dropped_blocks,
+                    "anomalyCounts": dict(self._continuity_log_counts),
+                }
+            )
+            logger.warning("[CONTINUITY] %s", json.dumps(summary))
+
         if hasattr(self, "csv_file") and not self.csv_file.closed:
             self.csv_file.close()
         # 2-PC 집계 — CSV 닫힌 직후 operator BE로 사본 업로드함 (soft-fail).
