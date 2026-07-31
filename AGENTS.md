@@ -4,6 +4,8 @@
 
 > 본 문서는 자가완결 — 외부 import 없이 본문만 읽고도 동작 가능해야 함. 상세 확장은 `.agents/rules/*.md` 참조 (단방향: 본문이 1차 소스).
 
+> **제품 문서와 작업 상태**: 4레포 공통 제품 문서는 `../docs/`(구조와 계약과 데이터는 `docs/architecture/`, 요구사항과 추적표는 `docs/requirements/`), 현재 작업 상태 정본은 `../.plans/DASHBOARD.md`다. (2026-07-30 DOCS-W001)
+
 ---
 
 ## 1. 프로젝트 역할
@@ -228,12 +230,28 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 ---
 
-## 계획 산출물 위치 (2026-07-10 표준화)
+## 계획 산출물 위치 (2026-07-31 갱신, DOCS-W005)
 
-mind-signal은 3레포 멀티레포 제품이므로 계획 산출물 `.plans/`는 **제품 단위 1개**로 상위 워크스페이스 `Team-project/.plans/`에 둔다. 레포 로컬 `.plans/`에는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 남긴다 — 작업 폴더(`{NN}-{기능명}`)를 여기에 새로 만들지 말 것.
+mind-signal은 4레포 멀티레포 제품이므로 계획 산출물 `.plans/`는 **제품 단위 1개**로 `Team-project/mind-signal/.plans/`에 둔다. 레포 로컬 `.plans/`에는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 남긴다 — 작업 폴더를 여기에 새로 만들지 말 것.
 
-- 세션 핸드오프 정본: `Team-project/.plans/HANDOFF.md` (구 `_next-session-handoff.md`, 2026-07-10 고정명화)
-- 작업 폴더: `Team-project/.plans/{NN}-{기능명}` (예: `19-2pc-autoconnect-ops`)
-- 상태: `Team-project/.plans/STATE.md`
-- 아카이브: `Team-project/.plans/_archive/HANDOFF-YYYYMMDD.md`
-- docs/는 외부 전달물 전용
+**`Team-project/.plans/`(루트)와 헷갈리지 말 것.** 루트 쪽은 2026-07-30 통합 이후 크로스 프로젝트 메타 전용이고 MindSignal 계획은 없다. 번호 폴더가 보여도 MindSignal이 아니다.
+
+- 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
+- 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
+- ID와 상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, LOCK 대기 — 주체는 사용자)
+- 소급 W-ID 매핑 정본: `mind-signal/.plans/LEGACY-REGISTRY.md`
+- 작업 폴더: `mind-signal/.plans/{WORK-ID}[-{slug}]` (예: `ANALYSIS-W001-eeg-dc-offset-removal`)
+- 상태 서술: `mind-signal/.plans/STATE.md`
+- `docs/`는 외부 전달물 전용
+
+### Work ID 읽는 법 (오독 주의)
+
+폴더명 접두사는 `{도메인}-W{NNN}` 형식이다. **번호를 전체 순번으로 읽으면 틀린다.**
+
+- **도메인별 독립 채번.** 전역 단일 시퀀스가 아니다. 등재 도메인은 `ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS` 다섯이고, 새 도메인은 첫 작업이 생길 때 README의 접두사 레지스트리에 한 줄 추가한다.
+- **신규는 W001부터, 소급은 W101부터.** 2026-07-30 이전 legacy에 부여한 소급 ID가 `W1xx` 대역이다. 그래서 `SESSION-W114`는 114번째가 아니라 **SESSION 소급 14번째**다.
+- **번호는 순서가 아니라 영구 식별자다.** 재번호화하지 않고 재사용하지 않으며 번호 공백은 오류가 아니라 역사다. **시간순은 번호가 아니라 레지스트리의 "시기" 열로 읽는다.**
+
+도메인별로 소급이 몇 개까지 찼는지는 `LEGACY-REGISTRY.md`의 "도메인별 채번 현황" 표를 본다. 새 ID를 딸 때 그 표를 먼저 확인할 것.
+
+**`project-flow` 스킬의 `{NN}-{기능명}` 규칙은 이 프로젝트에서 적용하지 않는다.** 공용 스킬 본문은 수정하지 않고 `.plans/README.md`의 로컬 선언이 오버라이드 실체다.
