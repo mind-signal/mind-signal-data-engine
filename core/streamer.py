@@ -790,11 +790,11 @@ class MindSignalStreamer(Cortex):
             # 공간(채널) 평균을 내어 1차원 시간 신호(길이 128)로 변환함
             mean_eeg_time_series = np.mean(buffer_arr, axis=1)
 
-            # 시계열 데이터를 필터에 통과시켜 파워 대역 계산함
+            # 시계열 데이터의 PSD를 구해 대역 파워 계산함
             powers = self.analyzer.get_all_powers(mean_eeg_time_series)
 
-            # 필터는 대역별 독립 계산이라 샘플이 전부 유한해도 overflow로 한
-            # 대역만 비유한이 될 수 있음. 그 행은 쓰지 않고 버림 — coverage 계약이
+            # 5대역이 같은 PSD를 공유하므로 비유한 입력은 전 대역에 전파됨
+            # (실측 확인). 그 행은 쓰지 않고 버림 — coverage 계약이
             # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
             # 시각도 함께 검사함. 불량 cortex_time은 fromtimestamp()에서 예외를 내
             # 콜백 자체를 죽임 (이후 이벤트가 전부 유실됨). 유한성만으로는 부족해서

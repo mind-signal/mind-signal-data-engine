@@ -212,7 +212,20 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 - **FAA (Frontal Alpha Asymmetry)** — 좌우 전두엽 알파파 비대칭, 감정 접근/회피 지표
 - **5대역 파워** — delta(0.5-4Hz), theta(4-8Hz), alpha(8-12Hz), beta(13-30Hz), gamma(30-45Hz)
-- **RMS Power** — 필터링된 신호의 Root Mean Square, 각 대역 강도
+- **RMS Power** — 각 대역 강도를 Root Mean Square(uV)로 표현한 값
+
+### 대역 파워 산출 계약 (ANALYSIS-W001, 2026-07-31)
+
+- **산출 방식은 PSD 대역 합산이다.** `welch(nperseg=창길이, detrend=False)`로 PSD를 구하고 대역 빈을 합산한 뒤 빈 간격을 곱해 제곱근을 취한다. **대역통과 필터뱅크로 되돌리지 말 것** — 인과 필터는 128샘플 창에서 초기조건 0 과도응답이 창 전체를 지배해 대역 파워가 뇌파가 아니라 DC 약 4200uV에 비례하는 상수로 나왔고(alpha 200 고정 결함), 영위상 필터로 바꿔도 시작 위상에 따라 회복률이 94.4에서 97.7%로 흔들려 위상 안정성 테스트가 실패한다.
+- **평균화가 없는 단일 세그먼트다.** `nperseg`가 창 전체와 같으므로 이름은 Welch지만 실체는 Hann 창 피리오도그램이다. 창당 추정 분산이 크다(백색잡음 실측 변동계수 0.31). 세션 평균 지표는 수백 창 평균이라 무해하나, 동조율은 창 단위 시계열 상관이라 이 잡음이 상관을 다소 감쇠시킨다. 겹침 평균은 이미 취약한 delta 해상도를 더 깎으므로 택하지 않았다.
+- **적분은 직사각형 합이다.** 사다리꼴(`np.trapezoid`)로 바꾸지 말 것. 사다리꼴은 대역 경계 빈 가중치를 절반으로 깎아 delta 1Hz 회복률을 91.3%에서 70.7%로 떨어뜨린다. `test_delta_recovery_pins_rectangular_quadrature`가 이 계약을 지킨다(대역 중앙 톤은 두 방식 결과가 같아 판별에 못 쓴다). 빈 간격을 곱하는 스케일 인자는 `test_bin_width_scaling_holds_for_non_unit_resolution`이 2초 창으로 지킨다 — 1초 창은 빈 간격이 정확히 1.0이라 곱을 빼도 값이 같다.
+- **RMS 환산은 근사다.** PSD 빈 합에 빈 간격을 곱한 값은 정확히는 Hann 제곱 가중 평균이라 단순 평균 제곱과 다르다. 정상 신호에서 근사 성립하고 대역 중앙 정현파에서는 정확히 일치하나, 추세가 강한 신호에서는 어긋난다(랜덤워크 실측 비율 0.33, 백색잡음 1.18). 상대 비교용 지표로 쓰고 절대 교정값으로 쓰지 말 것.
+- **RMS 규모** — 정상 측정에서 한 자리수에서 십 단위다. 20uV 알파 정현파 1초 창의 alpha는 14.14(참값의 100%)다. 세 자리수(예: alpha 200 고정)가 나오면 DC 오프셋 또는 인과 필터 과도응답 결함이다. 라이브 뇌파의 절대 규모는 실기기 검증 전까지 미확인이므로 위 수치는 합성 신호 기준이다.
+- **delta 정확도 주의** — 1초 창에서 회복률이 2Hz 이상은 100%이나 1Hz 91.3%, 0.7Hz 64.1%로 떨어진다. 원인은 1Hz 빈 해상도이며 창을 늘려야만 개선된다. 대역 하한 근처 성분은 과소평가되므로 대역 간 비교와 유사도 해석에 주의한다.
+- **대역 경계 겹침** — 경계는 닫힌 구간이라 4Hz, 8Hz, 30Hz 빈이 인접 두 대역에 모두 계산된다. 연속 스펙트럼에서는 경계 빈이 항상 존재하므로 **이 중복은 예외가 아니라 상시 발생**하며, 광대역 신호에서 대역별 값의 합은 전체 파워보다 크다. 다만 두 피실험자에게 동일하게 걸리는 왜곡이라 방향성 편향이 없고 코사인 유사도 영향은 1e-4 수준으로 실측됐다. 중앙 주파수 정확도를 위한 의도된 선택이며 `test_band_edges_are_closed_intervals`가 고정한다.
+- **제거된 API** — `filter_delta`부터 `filter_gamma`까지 5개 메서드와 `_butter_bandpass`와 `get_rms_power`는 제거됐다(Welch 경로에 "필터링된 시계열"이라는 중간 산출물이 없어 전부 호출자 0건이었음). 대체는 `get_band_power(values, band)`다.
+- **짧은 창 금지** — 128샘플 미만은 빈 간격이 넓어져 대역에 빈이 안 잡히고 예외 없이 0.0이나 무의미한 값이 나온다(길이 16에서 theta와 alpha가 나란히 11.86). `_band_powers_from` 진입부에서 `ValueError`로 막으므로 `get_all_powers`와 `get_band_power` 모두 보호된다. 라이브 경로는 `streamer`가 비오버랩으로 버퍼를 비워 항상 128이다.
+- **DC 제거자는 하나다** — `_remove_dc`가 유일하며 `welch`는 `detrend=False`로 부른다. 둘을 겹쳐 두면 어느 쪽을 없애도 결과가 같아져 회귀 테스트가 무력해진다. 상수 DC 입력 테스트가 이 계약을 지킨다.
 - **Synchrony** — 두 피실험자 간 뇌파 상관계수 (Pearson correlation)
 - **EmotivMetrics (MET)** — Emotiv 자체 산출 지표 6종 (focus, engagement, interest, excitement, stress, relaxation)
 - **Cortex API** — Emotiv 헤드셋과 WebSocket(wss://localhost:6868) JSON-RPC 인터페이스
@@ -238,7 +251,7 @@ mind-signal은 4레포 멀티레포 제품이므로 계획 산출물 `.plans/`�
 
 - 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
-- ID와 상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, LOCK 대기 — 주체는 사용자)
+- ID와 상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, **LOCK** — 2026-07-31 사용자 승인)
 - 소급 W-ID 매핑 정본: `mind-signal/.plans/LEGACY-REGISTRY.md`
 - 작업 폴더: `mind-signal/.plans/{WORK-ID}[-{slug}]` (예: `ANALYSIS-W001-eeg-dc-offset-removal`)
 - 상태 서술: `mind-signal/.plans/STATE.md`
