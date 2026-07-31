@@ -23,7 +23,11 @@ def _tone(freq: float, dc: float = DC_LEVEL, n: int = 128, phase: float = 0.0):
 
 
 def test_constant_dc_input_yields_zero_band_power():
-    """[회귀 A] 뇌파 0인 상수 입력은 전 대역 0이어야 함"""
+    """[회귀 A] 뇌파 0인 상수 입력은 전 대역 0이어야 함.
+
+    welch를 detrend=False로 호출하므로 _remove_dc가 유일한 DC 제거자임.
+    그 호출을 빼면 이 테스트가 delta 약 2425로 실패함.
+    """
     powers = MindSignalAnalyzer().get_all_powers(np.full(128, DC_LEVEL))
     assert max(powers.values()) < 1e-06
 
@@ -88,41 +92,60 @@ def test_remove_dc_returns_zero_mean():
     assert abs(float(np.mean(out))) < 1e-09
 
 
-def test_get_all_powers_routes_through_remove_dc(monkeypatch):
-    """[회귀 D2] get_all_powers가 실제로 _remove_dc를 경유함.
+def test_delta_recovery_pins_rectangular_quadrature():
+    """[회귀 F] 대역 적분이 직사각형 합임을 delta 1Hz 회복률로 고정함.
 
-    D1은 헬퍼 본문만 지키므로 헬퍼를 남겨둔 채 호출만 빼는 무력화를 놓침
-    (그 상태에서 A/B/C/D1이 전부 통과함). 이 테스트가 그 경로를 지킴.
+    사다리꼴(np.trapezoid)은 대역 경계 빈 가중치를 절반으로 깎음. 1Hz 톤은
+    에너지가 대역 하한 근처에 있어 둘을 판별함 — 직사각형 91.3%, 사다리꼴
+    70.7%. 반면 대역 중앙 톤(예: alpha 10Hz)은 경계 빈이 0이라 두 방식의
+    결과가 같으므로 판별에 쓸 수 없음.
     """
-    calls = []
-    original = MindSignalAnalyzer._remove_dc
-
-    def spy(eeg_values):
-        calls.append(len(np.asarray(eeg_values)))
-        return original(eeg_values)
-
-    monkeypatch.setattr(MindSignalAnalyzer, "_remove_dc", staticmethod(spy))
-    MindSignalAnalyzer().get_all_powers(_tone(10.0))
-    assert calls == [128]  # 5대역에 재사용하므로 정확히 1회임
+    delta = MindSignalAnalyzer().get_all_powers(_tone(1.0))["delta"]
+    ratio = delta / TRUE_RMS
+    assert 0.90 <= ratio <= 0.93
 
 
-def test_band_sum_matches_total_rms():
-    """파세발 관계 계약 — 경계 밖 단일 톤의 5대역 합이 참 RMS와 일치함.
+def test_bin_width_scaling_holds_for_non_unit_resolution():
+    """[회귀 G] PSD 합에 빈 간격을 곱하는 스케일 인자를 고정함.
 
-    직사각형 합이 아니라 사다리꼴로 되돌리면 이 테스트가 실패함.
+    1초 창(128샘플 at 128Hz)은 빈 간격이 정확히 1.0이라 곱을 빼도 결과가
+    같음. 2초 창은 0.5가 되므로 스케일 인자 누락이 드러남(참값의 141%).
     """
-    powers = MindSignalAnalyzer().get_all_powers(_tone(10.0))
-    assert abs(sum(powers.values()) - TRUE_RMS) < 1e-06
+    n = 256  # 2초 창이라 빈 간격 0.5Hz임
+    t = np.arange(n) / FS
+    window = DC_LEVEL + TONE_AMPLITUDE * np.sin(2 * np.pi * 10.0 * t)
+    ratio = MindSignalAnalyzer().get_all_powers(window)["alpha"] / TRUE_RMS
+    assert 0.95 <= ratio <= 1.05
 
 
-def test_short_window_raises_instead_of_returning_zero():
+def test_band_edges_are_closed_intervals():
+    """대역 경계가 닫힌 구간임을 고정함.
+
+    8Hz는 theta 상한이자 alpha 하한이라 두 대역에 같은 값으로 계산됨.
+    반열린 구간으로 바꾸면 한쪽만 잡혀 이 계약이 깨짐. 중앙 주파수 정확도를
+    위한 의도된 선택임 — ANALYSIS-W001 결정 2 참조.
+    """
+    powers = MindSignalAnalyzer().get_all_powers(_tone(8.0))
+    assert powers["theta"] == pytest.approx(powers["alpha"], rel=1e-09)
+    assert powers["alpha"] / TRUE_RMS > 0.5
+
+
+@pytest.mark.parametrize("entry", ["get_all_powers", "get_band_power"])
+def test_short_window_raises_instead_of_returning_zero(entry):
     """창이 짧으면 조용한 0.0 대신 예외여야 함.
 
-    빈 간격이 넓어지면 대역에 빈이 하나도 안 잡혀 톤이 있어도 0.0이 나옴.
-    하류 유한성 검사가 그 0을 통과시키므로 진입점에서 막음.
+    빈 간격이 넓어지면 대역에 빈이 안 잡혀 톤이 있어도 0.0이 나오거나
+    (길이 16에서는) theta와 alpha가 나란히 11.86인 무의미한 값이 나옴.
+    하류 유한성 검사가 그 값을 통과시키므로 진입점에서 막음. 실사용 진입점은
+    get_all_powers 쪽이므로 두 경로 모두 검사함.
     """
+    analyzer = MindSignalAnalyzer()
+    short = _tone(10.0, n=64)
     with pytest.raises(ValueError):
-        MindSignalAnalyzer().get_band_power(_tone(10.0, n=64), "alpha")
+        if entry == "get_all_powers":
+            analyzer.get_all_powers(short)
+        else:
+            analyzer.get_band_power(short, "alpha")
 
 
 def test_synchrony_recovers_common_alpha_modulation():

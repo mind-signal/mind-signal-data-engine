@@ -34,7 +34,9 @@ class MindSignalAnalyzer:
         fs = 128  # Emotiv Insight 샘플링 레이트
         freqs, psd = welch(eeg_data, fs, nperseg=fs * 2)
 
-        # 2. Alpha 대역(8-13Hz) 추출
+        # 2. Alpha 대역(8-13Hz) 추출.
+        # 주의: BANDS의 alpha는 8-12Hz인데 여기는 8-13Hz임. FAA 문헌 관례를
+        # 따른 것이라 의도적 불일치임. 현재 파이프라인에서 미호출 상태임
         alpha_mask = (freqs >= 8) & (freqs <= 13)
         alpha_power = np.mean(psd[:, alpha_mask], axis=1)
 
@@ -60,9 +62,10 @@ class MindSignalAnalyzer:
         """창별 평균을 빼서 DC 오프셋 제거함.
 
         Emotiv Insight의 부동 DC 준위는 약 4200uV이며 제조사 문서가 FFT류
-        분석 전 DC 제거를 요구함. welch의 detrend="constant"가 같은 일을 다시
-        하므로 운영 범위 입력에서 결과는 바뀌지 않으나, detrend 인자가 바뀌는
-        경우의 안전망이자 극단 진폭에서의 부동소수 조건수 개선으로 유지함.
+        분석 전 DC 제거를 요구함. **이 단계가 파이프라인의 유일한 DC 제거자임**
+        — welch는 detrend=False로 호출함. 제거자를 하나로 두어야 이 줄이
+        실제로 부하를 지고 상수 입력 회귀 테스트가 그것을 지킴(둘을 겹쳐 두면
+        어느 쪽을 없애도 결과가 같아 테스트가 무력해짐).
 
         Args:
             eeg_values: 1차원 EEG 시계열임
@@ -76,16 +79,19 @@ class MindSignalAnalyzer:
     def _band_rms(self, freqs: np.ndarray, psd: np.ndarray, band: str) -> float:
         """대역 PSD를 합산해 RMS 진폭으로 환산함.
 
-        파세발 관계로 PSD 빈 합에 빈 간격을 곱한 값이 그 대역 성분의 평균
-        제곱이므로 제곱근이 RMS임. 단위는 기존과 같은 uV임.
+        PSD 빈 합에 빈 간격을 곱한 값의 제곱근을 대역 RMS(uV)로 씀. 정확히는
+        창(Hann) 제곱 가중 평균이라 단순 평균 제곱과 같지 않음 — 정상 신호에서
+        근사 성립하고 대역 중앙 정현파에서는 정확히 일치하나, 추세가 강한
+        신호에서는 어긋남(랜덤워크 실측 비율 0.33). 절대 교정값이 필요한
+        용도에는 그대로 쓰지 말 것.
 
-        사다리꼴(np.trapezoid)이 아니라 직사각형 합을 쓰는 이유: 이산 PSD
-        빈에서 파세발 관계를 정확히 지키는 것은 직사각형 합임. 사다리꼴은
+        사다리꼴(np.trapezoid)이 아니라 직사각형 합을 쓰는 이유: 사다리꼴은
         대역 경계 빈 가중치를 절반으로 깎아 delta 1Hz 회복률을 91.3%에서
-        70.7%로 떨어뜨림.
+        70.7%로 떨어뜨림. 회귀 테스트가 이 값으로 고정함.
 
-        대역 경계는 닫힌 구간임. 경계 주파수 성분이 인접 두 대역에 모두
-        계산되지만, 반열린 구간으로 바꾸면 중앙 주파수 회복률이 떨어짐.
+        대역 경계는 닫힌 구간이라 경계 빈이 인접 두 대역에 모두 계산됨.
+        광대역 신호에서 대역별 값의 합이 전체보다 커지지만, 두 피실험자에
+        동일하게 걸리는 왜곡이라 코사인 유사도 영향은 1e-4 수준임.
 
         Args:
             freqs: welch가 반환한 주파수 축임
@@ -105,31 +111,45 @@ class MindSignalAnalyzer:
     def _band_powers_from(self, eeg_values: np.ndarray) -> dict[str, float]:
         """단일 welch 호출로 5대역 RMS 산출함.
 
-        nperseg를 창 전체로 두므로 세그먼트가 1개이며 detrend="constant"가
-        그 세그먼트의 평균을 뺌.
+        nperseg를 창 전체로 두므로 세그먼트가 1개임. 즉 평균화가 있는 Welch가
+        아니라 **Hann 창 피리오도그램**이며 창당 추정 분산이 큼(백색잡음 실측
+        변동계수 0.31). 세션 평균 지표는 수백 창 평균이라 무해하나 동조율은
+        창 단위 시계열 상관이라 이 잡음이 상관을 0쪽으로 다소 감쇠시킴.
+        겹침 평균(nperseg를 절반으로)은 이미 취약한 delta 해상도를 더 깎으므로
+        택하지 않음.
+
+        detrend=False인 이유: DC 제거는 _remove_dc 한 곳에서만 함.
+
+        Raises:
+            ValueError: 창이 MIN_WINDOW_SAMPLES 미만임
         """
         data = self._remove_dc(eeg_values)
+        if data.size < self.MIN_WINDOW_SAMPLES:
+            raise ValueError(
+                f"창은 {self.MIN_WINDOW_SAMPLES}샘플 이상이어야 함. "
+                f"받은 길이 {data.size}"
+            )
         freqs, psd = welch(
             data,
             fs=self.fs,
             nperseg=len(data),
-            detrend="constant",
+            detrend=False,
             scaling="density",
         )
         return {band: self._band_rms(freqs, psd, band) for band in self.BANDS}
-
-    def get_rms_power(self, filtered_data: np.ndarray) -> float:
-        """이미 필터링된 신호의 강도(RMS) 반환함"""
-        return float(np.sqrt(np.mean(np.square(filtered_data))))
 
     def get_all_powers(self, eeg_values: np.ndarray) -> dict[str, float]:
         """5개 대역의 RMS 강도를 한 번에 계산해 반환함.
 
         Args:
-            eeg_values: 길이 128의 1차원 EEG 시계열(채널 공간 평균)임
+            eeg_values: 길이 MIN_WINDOW_SAMPLES 이상의 1차원 EEG 시계열임
+                (채널 공간 평균)
 
         Returns:
             delta, theta, alpha, beta, gamma를 키로 하는 RMS(uV) dict 반환
+
+        Raises:
+            ValueError: 창이 MIN_WINDOW_SAMPLES 미만임
         """
         return self._band_powers_from(eeg_values)
 
@@ -137,7 +157,7 @@ class MindSignalAnalyzer:
         """단일 대역 RMS 반환함. 제거된 filter_* 계열의 대체 진입점임.
 
         Args:
-            eeg_values: 1차원 EEG 시계열임. 길이 MIN_WINDOW_SAMPLES 이상이어야 함
+            eeg_values: 길이 MIN_WINDOW_SAMPLES 이상의 1차원 EEG 시계열임
             band: BANDS의 키임
 
         Returns:
@@ -146,12 +166,6 @@ class MindSignalAnalyzer:
         Raises:
             ValueError: 창이 너무 짧거나 미등록 대역임
         """
-        values = np.asarray(eeg_values, dtype=float)
-        if values.size < self.MIN_WINDOW_SAMPLES:
-            raise ValueError(
-                f"창은 {self.MIN_WINDOW_SAMPLES}샘플 이상이어야 함. "
-                f"받은 길이 {values.size}"
-            )
         if band not in self.BANDS:
             raise ValueError(f"미등록 대역 {band}")
-        return self._band_powers_from(values)[band]
+        return self._band_powers_from(eeg_values)[band]
