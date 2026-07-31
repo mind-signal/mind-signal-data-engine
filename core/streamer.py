@@ -383,6 +383,13 @@ class MindSignalStreamer(Cortex):
         # 직전 롤업 시점의 이상 누적치임. 구간 증분 계산용
         self._rollup_prev_counts: dict[str, int] = {}
         self._rollup_active = False
+        # 롤업 스레드와 종료 경로가 _log_rollup을 동시에 부르면 증분 계산의
+        # 스냅샷과 교체 사이가 갈라져 anomalyDelta가 중복 계상되거나 구간
+        # 경계가 깨짐. 두 호출을 직렬화함
+        self._rollup_lock = threading.Lock()
+        # sleep 대신 이 이벤트를 기다림. 종료 시 최대 30초를 기다리지 않고
+        # 즉시 깨어남
+        self._rollup_stop = threading.Event()
         self._health_published_at: dict[str, float] = {}
         self._last_event_monotonic: float | None = None
         self._eeg_stale = False
@@ -712,6 +719,35 @@ class MindSignalStreamer(Cortex):
                     {"metric": key, "value": repr(data[index])},
                 )
 
+    def _finite_or_blank(
+        self, channel_powers: dict, channel: str, band: str
+    ) -> float | str:
+        """채널별 대역 값이 유한하면 그대로, 아니면 공란 반환함.
+
+        평균값 5대역은 행 단위 유한성 검사를 이미 거치지만(non_finite_power로
+        행 전체를 버림) 채널별 값은 그 검사 대상이 아님. 채널 하나가 비유한이어도
+        나머지 채널은 유효하므로 행을 버리지 않고 해당 셀만 비움. 비우지 않으면
+        "nan" 문자열이 CSV에 박혀 하류 파서를 오염시킴.
+
+        Args:
+            channel_powers: 채널 이름을 키로 하는 대역 파워 dict임
+            channel: 대상 채널 이름임
+            band: 대상 대역 이름임
+
+        Returns:
+            유한한 값 또는 빈 문자열 반환
+        """
+        value = channel_powers.get(channel, {}).get(band)
+        if value is None:
+            return ""
+        if not np.isfinite(value):
+            self._log_continuity(
+                "channel_power_non_finite",
+                {"channel": channel, "band": band, "value": repr(value)},
+            )
+            return ""
+        return value
+
     def _start_rollup_thread(self) -> None:
         """30초 주기 롤업 스레드 기동함.
 
@@ -725,18 +761,22 @@ class MindSignalStreamer(Cortex):
         것을 보여줌.
         """
         self._rollup_active = True
+        self._rollup_stop.clear()
 
         def loop() -> None:
-            while self._rollup_active:
-                time.sleep(CONTINUITY_ROLLUP_INTERVAL_SEC)
-                if not self._rollup_active:
-                    break
+            # wait는 이벤트가 설정되면 True를 반환함. 즉 종료 신호가 오면
+            # 남은 대기를 건너뛰고 즉시 빠져나감
+            while not self._rollup_stop.wait(CONTINUITY_ROLLUP_INTERVAL_SEC):
                 try:
-                    self._log_rollup()
+                    with self._rollup_lock:
+                        self._log_rollup()
                 except Exception as e:  # 롤업 실패가 측정을 멈추면 안 됨
                     logger.warning(f"[CONTINUITY] 롤업 실패 (무시): {e}")
 
-        threading.Thread(target=loop, daemon=True, name="continuity-rollup").start()
+        self._rollup_thread = threading.Thread(
+            target=loop, daemon=True, name="continuity-rollup"
+        )
+        self._rollup_thread.start()
 
     def _log_rollup(self) -> None:
         """직전 구간의 누적 지표를 상한 없이 1행으로 남김.
@@ -940,7 +980,7 @@ class MindSignalStreamer(Cortex):
                     self.latest_met["stress"],
                     self.latest_met["relaxation"],
                     *[
-                        channel_powers.get(ch, {}).get(band, "")
+                        self._finite_or_blank(channel_powers, ch, band)
                         for ch in TARGET_EEG_CHANNELS
                         for band in BAND_NAMES
                     ],
@@ -1034,14 +1074,23 @@ class MindSignalStreamer(Cortex):
 
     def on_close(self, *args, **kwargs):
         self._watchdog_active = False
-        # 마지막 구간(직전 롤업 이후)을 남기고 스레드를 멈춤. 순서가 중요함 —
-        # 먼저 끄면 30초 미만의 꼬리 구간이 통째로 사라짐
+        # 롤업 스레드를 먼저 멈춘 뒤 마지막 구간(직전 롤업 이후)을 남김.
+        # 순서가 중요함 — 스레드를 안 멈추고 기록하면 두 호출이 증분 계산의
+        # 스냅샷과 교체 사이에서 갈라짐. 반대로 기록을 생략하면 30초 미만의
+        # 꼬리 구간이 통째로 사라짐
         if getattr(self, "_rollup_active", False):
+            self._rollup_active = False
+            self._rollup_stop.set()
+            thread = getattr(self, "_rollup_thread", None)
+            if thread is not None and thread.is_alive():
+                # 대기 중이면 이벤트로 즉시 깨어나고, 기록 중이면 그것이 끝날
+                # 때까지만 기다림. 종료 경로를 오래 붙잡지 않도록 상한을 둠
+                thread.join(timeout=5)
             try:
-                self._log_rollup()
+                with self._rollup_lock:
+                    self._log_rollup()
             except Exception as e:
                 logger.warning(f"[CONTINUITY] 종료 롤업 실패 (무시): {e}")
-            self._rollup_active = False
         elapsed = time.time() - self.start_time if hasattr(self, "start_time") else 0
 
         # 총 EEG 이벤트 대비 CSV 행 수를 남김. 128 이벤트당 1행이 정상이라
