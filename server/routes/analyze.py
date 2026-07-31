@@ -1,7 +1,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from server.config import settings
 from server.services.analysis import compute_session_analysis
@@ -55,11 +55,21 @@ async def analyze(
 class PipelineParams(BaseModel):
     """분석 파이프라인 파라미터임"""
 
-    stimulus_duration_sec: int = 60
-    window_size_sec: int = 10
-    n_stimuli: int = 10
-    baseline_duration_sec: int = 30
-    band_cols: list[str] = ["alpha", "beta", "theta", "gamma"]
+    stimulus_duration_sec: int = Field(default=60, gt=0)
+    window_size_sec: int = Field(default=10, gt=0)
+    n_stimuli: int = Field(default=10, gt=0)
+    baseline_duration_sec: int = Field(default=30, gt=0)
+    band_cols: list[str] = Field(
+        default_factory=lambda: ["alpha", "beta", "theta", "gamma"],
+        min_length=1,
+    )
+
+    @model_validator(mode="after")
+    def validate_window_partition(self) -> "PipelineParams":
+        """자극 길이가 윈도우 크기로 나누어떨어지는지 검증함"""
+        if self.stimulus_duration_sec % self.window_size_sec != 0:
+            raise ValueError("stimulus_duration_sec는 window_size_sec의 배수여야 함")
+        return self
 
 
 class PipelineRequest(BaseModel):
@@ -67,7 +77,7 @@ class PipelineRequest(BaseModel):
 
     group_id: str
     subject_indices: list[int]
-    params: PipelineParams = PipelineParams()
+    params: PipelineParams = Field(default_factory=PipelineParams)
     satisfaction_scores: dict[int, float] | None = None  # {1: 7.5, 2: 6.0}
     include_markdown: bool = False
     mode: Literal["DUAL", "SEQUENTIAL", "BTI", "DUAL_2PC"] = "DUAL"  # 실험 모드 선택
@@ -75,12 +85,20 @@ class PipelineRequest(BaseModel):
 
 
 class SubjectFeatureResult(BaseModel):
-    """피실험자별 feature 추출 결과 스키마임"""
+    """피실험자별 feature 추출 결과 스키마임
+
+    한쪽 subject의 CSV가 없으면(2-PC에서 원격 subject 미수집 등) feature 필드 없이
+    error만 채워 partial 응답으로 반환함. 이때 500 대신 200으로 내려 FE가 어느
+    subject가 실패했는지 판단하게 함.
+    """
 
     subject_index: int
-    baseline: dict[str, float]
-    features: dict[str, float]
-    n_features: int
+    baseline: dict[str, float] | None = None
+    features: dict[str, float] | None = None
+    n_features: int | None = None
+    error: str | None = None
+    # 소비자가 자유 문장 대신 코드로 분기하도록 계약 위반 식별자를 함께 실음
+    error_code: str | None = None
 
 
 class PipelineResponse(BaseModel):

@@ -29,21 +29,40 @@ def main():
     group_id = sys.argv[1]
     subject_index = sys.argv[2]
 
-    # subject_index에 매핑된 헤드셋 ID 조회함 (미설정 시 SDK 자동 선택)
-    headset_id = os.getenv(f"HEADSET_ID_{subject_index}", "")
+    # 동적 바인딩: 헤드셋 ID를 고정하지 않음. 빈 문자열을 넘기면 SDK가 이 PC에
+    # 연결된 첫 헤드셋을 자동 선택해 subject_index 스트림으로 값을 주입함.
+    # 헤드셋 ID 하드코딩 제거함. 어떤 헤드셋이 붙어도 동작함 (PC당 헤드셋 1대 전제).
+    headset_id = ""
+
+    # proxy 연동 설정 로드함 (ALIGNMENT_LOCATION=proxy 시 proxy 모드 활성화)
+    alignment_location = os.getenv("ALIGNMENT_LOCATION", "be")
+    proxy_url = os.getenv("PROXY_URL")
+    engine_secret_key = os.getenv("ENGINE_SECRET_KEY", "")
+    max_proxy_post_retries_raw = os.getenv("MAX_PROXY_POST_RETRIES", "2")
+    max_proxy_post_retries = int(max_proxy_post_retries_raw)
+    proxy_health_poll_interval_sec = (
+        int(os.getenv("PROXY_HEALTH_POLL_INTERVAL_MS", "1000")) / 1000.0
+    )
+    proxy_fail_closed_threshold_ms = int(os.getenv("FAIL_CLOSED_THRESHOLD_MS", "3000"))
 
     print(f"Mind Signal Engine 구동 시작함 (Group: {group_id}, Index: {subject_index})")
-    if headset_id:
-        print(f"지정 헤드셋: {headset_id}")
-    else:
-        print(
-            f"[WARNING] HEADSET_ID_{subject_index} 미설정"
-            " — SDK가 첫 번째 헤드셋을 자동 선택함"
-        )
+    print(
+        f"[INFO] 헤드셋 동적 선택: Cortex가 보고한 첫 헤드셋을 subject {subject_index}로 사용함"
+    )
 
     # 스트리머 인스턴스 생성 및 실행 수행함
     streamer = MindSignalStreamer(
-        group_id, subject_index, client_id, client_secret, headset_id=headset_id
+        group_id,
+        subject_index,
+        client_id,
+        client_secret,
+        headset_id=headset_id,
+        alignment_location=alignment_location,
+        proxy_url=proxy_url,
+        engine_secret_key=engine_secret_key,
+        max_proxy_post_retries=max_proxy_post_retries,
+        proxy_health_poll_interval_sec=proxy_health_poll_interval_sec,
+        proxy_fail_closed_threshold_ms=proxy_fail_closed_threshold_ms,
     )
     streamer.open()
 

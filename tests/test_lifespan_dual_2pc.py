@@ -42,6 +42,8 @@ async def test_lifespan_placeholder_secret_warns_but_continues(
     monkeypatch.setattr(settings, "dual_2pc_subject_index", None)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     # SEQUENTIAL register 모의함
     httpx_mock.add_response(url=BACKEND_URL, method="POST", status_code=200)
@@ -65,6 +67,8 @@ async def test_lifespan_dual_env_immediate_register(monkeypatch, httpx_mock):
     monkeypatch.setattr(settings, "dual_2pc_subject_index", 1)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
 
@@ -85,6 +89,8 @@ async def test_lifespan_pending_no_register_no_heartbeat(monkeypatch):
     monkeypatch.setattr(settings, "dual_2pc_subject_index", 2)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     mod = _import_fresh_app()
     async with _run_lifespan(mod.app):
@@ -103,6 +109,8 @@ async def test_lifespan_pending_shutdown_no_crash(monkeypatch):
     monkeypatch.setattr(settings, "dual_2pc_subject_index", 1)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     mod = _import_fresh_app()
     # shutdown 시 heartbeat_task가 None이어도 AttributeError/UnboundLocalError 없이 종료해야 함
@@ -120,6 +128,8 @@ async def test_lifespan_empty_string_group_id_treated_as_pending(monkeypatch):
     monkeypatch.setattr(settings, "dual_2pc_subject_index", 1)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     mod = _import_fresh_app()
     async with _run_lifespan(mod.app):
@@ -137,6 +147,8 @@ async def test_lifespan_single_legacy_register(monkeypatch, httpx_mock):
     monkeypatch.setattr(settings, "dual_2pc_subject_index", None)
     monkeypatch.setattr(settings, "registration_mode", "local")
     monkeypatch.setattr(settings, "lan_ip", "127.0.0.1")
+    # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
+    monkeypatch.setattr(settings, "alignment_location", "be")
 
     httpx_mock.add_response(url=BACKEND_URL, method="POST", status_code=200)
 

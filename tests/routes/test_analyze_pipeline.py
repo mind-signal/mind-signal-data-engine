@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest  # noqa: F401
 
+from server.services.analysis import AnalysisContractError
 from tests.conftest import TEST_GROUP_ID, TEST_SECRET  # noqa: F401
 
 
@@ -122,11 +123,15 @@ class TestAnalyzePipelineEndpoint:
         assert data["y_score"] is not None
 
     @patch("server.services.analysis.run_full_pipeline")
-    def test_csv_not_found_in_response(
+    def test_csv_not_found_returns_partial_200(
         self, mock_pipeline, test_client, pipeline_secret_header
     ):
-        """CSV 없는 subject의 응답 처리 검증함"""
-        # subjects에 error가 없는 정상 응답을 반환하되, 최소 구조만 갖춤
+        """한쪽 subject CSV 미발견 시 500 대신 200 + error 담은 partial 응답 반환함.
+
+        2-PC에서 원격 subject가 미수집되면 run_full_pipeline이 그 subject를
+        {subject_index, error}로 담음. SubjectFeatureResult가 feature 필드를 필수로
+        요구하면 여기서 ValidationError로 500이 났음(회귀 방지).
+        """
         mock_pipeline.return_value = {
             "group_id": TEST_GROUP_ID,
             "subjects": [
@@ -135,7 +140,8 @@ class TestAnalyzePipelineEndpoint:
                     "baseline": {"alpha": 0.5},
                     "features": {},
                     "n_features": 0,
-                }
+                },
+                {"subject_index": 2, "error": "CSV 파일 미발견"},
             ],
             "pair_features": None,
             "y_score": None,
@@ -153,10 +159,60 @@ class TestAnalyzePipelineEndpoint:
         }
         response = test_client.post(
             "/api/analyze/pipeline",
-            json={"group_id": TEST_GROUP_ID, "subject_indices": [1]},
+            json={"group_id": TEST_GROUP_ID, "subject_indices": [1, 2]},
             headers=pipeline_secret_header,
         )
         assert response.status_code == 200
+        data = response.json()
+        assert data["subjects"][1]["error"] == "CSV 파일 미발견"
+        assert data["subjects"][1]["features"] is None
+
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_subject_error_code_survives_response_model(
+        self, mock_pipeline, test_client, pipeline_secret_header
+    ):
+        """subject 단위 계약 위반의 error_code가 응답까지 도달함.
+
+        SubjectFeatureResult에 error_code 필드가 없으면 Pydantic이 조용히 버려
+        소비자가 자유 문장으로만 분기해야 했음(회귀 방지).
+        """
+        mock_pipeline.return_value = {
+            "group_id": TEST_GROUP_ID,
+            "subjects": [
+                {
+                    "subject_index": 1,
+                    "baseline": {"alpha": 0.5},
+                    "features": {},
+                    "n_features": 0,
+                },
+                {
+                    "subject_index": 2,
+                    "error": "baseline 관측 초가 최소 coverage에 미달함: 14/15",
+                    "error_code": "BASELINE_COVERAGE_INSUFFICIENT",
+                },
+            ],
+            "pair_features": None,
+            "y_score": None,
+            "synchrony_score": None,
+            "pipeline_params": {
+                "stimulus_duration_sec": 60,
+                "window_size_sec": 10,
+                "n_stimuli": 10,
+                "baseline_duration_sec": 30,
+                "band_cols": ["alpha"],
+                "n_windows_per_stimulus": 6,
+                "total_features_per_subject": 0,
+            },
+            "dataframes": {},
+        }
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={"group_id": TEST_GROUP_ID, "subject_indices": [1, 2]},
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 200
+        subject = response.json()["subjects"][1]
+        assert subject["error_code"] == "BASELINE_COVERAGE_INSUFFICIENT"
 
     def test_invalid_body_missing_group_id(self, test_client, pipeline_secret_header):
         """group_id 미포함 body → 422 validation error 반환함"""
@@ -166,6 +222,69 @@ class TestAnalyzePipelineEndpoint:
             headers=pipeline_secret_header,
         )
         assert response.status_code == 422
+
+    @pytest.mark.parametrize("mode", ["DUAL", "DUAL_2PC"])
+    @pytest.mark.parametrize(
+        ("error_code", "detail"),
+        # subject 단위 위반(TIMESTAMP_*, BASELINE_*)은 partial 200으로 흡수되므로
+        # 전역 422로 탈출하는 공통 구간 위반만 라우트 계약으로 검증함
+        [("COMMON_WINDOW_TOO_SHORT", "공통 구간 부족")],
+    )
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_analysis_contract_error_returns_flat_422_in_both_dual_paths(
+        self,
+        mock_pipeline,
+        error_code,
+        detail,
+        mode,
+        test_client,
+        pipeline_secret_header,
+    ):
+        """두 DUAL 호출 경로에서 분석 계약 오류를 평면 422로 반환함"""
+        mock_pipeline.side_effect = AnalysisContractError(error_code, detail)
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "mode": mode,
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 422
+        assert response.json() == {
+            "error_code": error_code,
+            "detail": detail,
+        }
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"window_size_sec": 0},
+            {"baseline_duration_sec": -1},
+            {"band_cols": []},
+            {"stimulus_duration_sec": 61, "window_size_sec": 10},
+        ],
+    )
+    def test_invalid_pipeline_params_use_fastapi_validation_422(
+        self,
+        params,
+        test_client,
+        pipeline_secret_header,
+    ):
+        """비정상 파라미터를 실행 전 FastAPI validation 422로 거부함"""
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "params": params,
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 422
+        assert "detail" in response.json()
+        assert "error_code" not in response.json()
 
 
 class TestAnalyzePipelineModeField:

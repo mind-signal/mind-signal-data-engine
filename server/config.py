@@ -1,6 +1,16 @@
+import os
 from typing import Literal
 
+import certifi
 from pydantic_settings import BaseSettings
+
+# SSL_CERT_FILE이 존재하지 않는 경로를 가리키면 certifi 번들로 교정함.
+# conda base 활성화가 심는 stale 값(miniconda3/ssl/cacert.pem 부재)으로 httpx가
+# FileNotFoundError로 죽는 것을 방어함. config는 httpx 사용 모듈 대부분이 import하므로
+# 여기서 교정하면 런타임+테스트 전 경로에서 유효함.
+_ssl_cert = os.environ.get("SSL_CERT_FILE")
+if _ssl_cert and not os.path.exists(_ssl_cert):
+    os.environ["SSL_CERT_FILE"] = certifi.where()
 
 
 class Settings(BaseSettings):
@@ -17,29 +27,16 @@ class Settings(BaseSettings):
     # DUAL_2PC 세션 env (launcher 주입, 비-DUAL_2PC 기동 시 None)
     dual_2pc_group_id: str | None = None
     dual_2pc_subject_index: int | None = None
-    lan_ip: str | None = None  # LAN IP override (없으면 socket 자동 탐지)
+    lan_ip: str | None = (
+        None  # advertise IP override (없으면 Tailscale 자동탐지 후 socket 폴백)
+    )
 
-    # Emotiv
-    client_id: str = ""
-    client_secret: str = ""
-
-    # Redis
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-
-    # 실험
-    experiment_duration_minutes: int = 10
-
-    # 분석 파이프라인 파라미터
-    stimulus_duration_sec: int = 60  # 1개 자극의 총 시간 (초)
-    window_size_sec: int = 10  # 시간 분할 단위 (초)
-    n_stimuli: int = 10  # 전체 자극 수
-    n_bands: int = 4  # 사용할 뇌파 대역 수
-    baseline_duration_sec: int = 30  # baseline 구간 길이 (초)
-    band_cols: list[str] = ["alpha", "beta", "theta", "gamma"]  # 사용할 대역
-
-    # ngrok (REGISTRATION_MODE=ngrok 때만 필요)
-    ngrok_auth_token: str | None = None
+    # Proxy 연동 (engine-proxy-sync Phase 18)
+    proxy_url: str | None = None  # env PROXY_URL
+    alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+    proxy_reregister_interval_sec: int = (
+        20  # env PROXY_REREGISTER_INTERVAL_SEC — TTL 만료 전 재등록 주기(초)
+    )
 
     class Config:
         env_file = ".env.local"
