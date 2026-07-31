@@ -51,6 +51,11 @@ CONTINUITY_LOG_CAP_PER_KIND = 20
 # 매 샘플 발생 가능한 경보의 재발행 최소 간격임. BE도 같은 status 연속 수신을
 # 억제하지만(stream-health.service.ts), Redis에 초당 128건을 던질 이유가 없음.
 HEALTH_REPUBLISH_INTERVAL_SEC = 10
+# Emotiv Insight의 뇌파 채널임. CSV 채널별 컬럼 순서의 정본이며, 실제 헤드셋에
+# 일부 채널이 없어도 헤더는 이 순서 그대로 고정함(스키마 안정성).
+TARGET_EEG_CHANNELS = ["AF3", "T7", "Pz", "T8", "AF4"]
+# 대역별 컬럼 순서의 정본임. analyzer.BANDS와 같은 순서를 유지함.
+BAND_NAMES = ["delta", "theta", "alpha", "beta", "gamma"]
 
 
 class StreamContinuityTracker:
@@ -334,25 +339,29 @@ class MindSignalStreamer(Cortex):
         self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
         self.writer = csv.writer(self.csv_file)
 
+        # 앞 12열은 기존 스키마 그대로 유지함. 하류(엔진 분석, markdown, 유사도,
+        # BE coverage)가 이 이름들을 화이트리스트로 읽으므로 순서와 이름을
+        # 바꾸지 않음. 5대역 값은 채널 공간 평균 기준임.
+        # 뒤 25열은 채널별 대역 파워임. 부위별 분석을 위해 평균 전 값을 함께 남김.
+        # 미지 컬럼은 하류 화이트리스트 파서가 무시하므로 추가로 인한 회귀가 없음.
         header = [
             "timestamp",
-            "delta",
-            "theta",
-            "alpha",
-            "beta",
-            "gamma",
+            *BAND_NAMES,
             "focus",
             "engagement",
             "interest",
             "excitement",
             "stress",
             "relaxation",
+            *[f"{ch}_{band}" for ch in TARGET_EEG_CHANNELS for band in BAND_NAMES],
         ]
         self.writer.writerow(header)
 
         # 4. 런타임 매핑, 상태 변수 및 버퍼 초기화 수행함
         self.met_map = {}
         self.eeg_channel_indices = []
+        # eeg_channel_indices와 같은 순서의 채널 이름임. 버퍼 열과 채널을 잇는 키임
+        self.eeg_channel_names = []
         self.eeg_buffer = []
 
         # 스트림 연속성 계측 상태 초기화함 (P0-1). COUNTER와 INTERPOLATED 인덱스는
@@ -485,11 +494,20 @@ class MindSignalStreamer(Cortex):
                 print(f"[WARN] MET 라벨 미발견: {missing} (labels={labels})")
 
         elif stream_name == "eeg":
-            target_eeg_channels = ["AF3", "T7", "Pz", "T8", "AF4"]
+            # 이름과 인덱스를 같은 순서로 함께 보존함. 채널이 하나라도 빠지면
+            # 인덱스 목록만으로는 버퍼 열이 어느 채널인지 알 수 없어 채널별
+            # 대역 파워를 잘못된 컬럼에 쓰게 됨
+            self.eeg_channel_names = [ch for ch in TARGET_EEG_CHANNELS if ch in labels]
             self.eeg_channel_indices = [
-                labels.index(ch) for ch in target_eeg_channels if ch in labels
+                labels.index(ch) for ch in self.eeg_channel_names
             ]
-            print(f"EEG 채널 인덱스 매핑 완료됨: {self.eeg_channel_indices}")
+            print(
+                f"EEG 채널 인덱스 매핑 완료됨: "
+                f"{dict(zip(self.eeg_channel_names, self.eeg_channel_indices))}"
+            )
+            missing_eeg = [ch for ch in TARGET_EEG_CHANNELS if ch not in labels]
+            if missing_eeg:
+                print(f"[WARN] EEG 채널 미발견: {missing_eeg} (해당 컬럼은 공란임)")
 
             # 연속성 계측용 메타 채널 인덱스 확보함. 없으면 계측만 비활성되고
             # 측정 자체는 그대로 진행함.
@@ -793,6 +811,14 @@ class MindSignalStreamer(Cortex):
             # 시계열 데이터의 PSD를 구해 대역 파워 계산함
             powers = self.analyzer.get_all_powers(mean_eeg_time_series)
 
+            # 평균으로 뭉개기 전 채널별 대역 파워도 함께 산출함. 부위별 분석
+            # (예: 전두엽 알파 대 후두엽 알파)이 평균값만으로는 불가능해서임.
+            # 채널 하나가 불량이어도 나머지는 유효하므로 채널별로 독립 계산함
+            channel_powers = {
+                name: self.analyzer.get_all_powers(buffer_arr[:, col])
+                for col, name in enumerate(self.eeg_channel_names)
+            }
+
             # 5대역이 같은 PSD를 공유하므로 비유한 입력은 전 대역에 전파됨
             # (실측 확인). 그 행은 쓰지 않고 버림 — coverage 계약이
             # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
@@ -827,21 +853,24 @@ class MindSignalStreamer(Cortex):
             # Cortex 타임스탬프를 문자열로 변환함 (위 검사에서 변환된 값 재사용)
             formatted_time = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
 
-            # 1. CSV 기록 수행함
+            # 1. CSV 기록 수행함.
+            # 채널별 컬럼은 TARGET_EEG_CHANNELS 순서로 고정하고, 헤드셋에 없는
+            # 채널은 공란으로 남김. 헤더가 회차마다 달라지면 하류 파서가 깨짐
             self.writer.writerow(
                 [
                     formatted_time,
-                    powers["delta"],
-                    powers["theta"],
-                    powers["alpha"],
-                    powers["beta"],
-                    powers["gamma"],
+                    *[powers[band] for band in BAND_NAMES],
                     self.latest_met["focus"],
                     self.latest_met["engagement"],
                     self.latest_met["interest"],
                     self.latest_met["excitement"],
                     self.latest_met["stress"],
                     self.latest_met["relaxation"],
+                    *[
+                        channel_powers.get(ch, {}).get(band, "")
+                        for ch in TARGET_EEG_CHANNELS
+                        for band in BAND_NAMES
+                    ],
                 ]
             )
             self.csv_file.flush()
