@@ -212,7 +212,17 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 - **FAA (Frontal Alpha Asymmetry)** — 좌우 전두엽 알파파 비대칭, 감정 접근/회피 지표
 - **5대역 파워** — delta(0.5-4Hz), theta(4-8Hz), alpha(8-12Hz), beta(13-30Hz), gamma(30-45Hz)
-- **RMS Power** — 필터링된 신호의 Root Mean Square, 각 대역 강도
+- **RMS Power** — 각 대역 강도를 Root Mean Square(uV)로 표현한 값
+
+### 대역 파워 산출 계약 (ANALYSIS-W001, 2026-07-31)
+
+- **산출 방식은 Welch PSD 대역 합산이다.** `welch(nperseg=창길이, detrend="constant")`로 PSD를 구하고 대역 빈을 합산한 뒤 빈 간격을 곱해 제곱근을 취한다. **대역통과 필터뱅크로 되돌리지 말 것** — 인과 필터는 128샘플 창에서 초기조건 0 과도응답이 창 전체를 지배해 대역 파워가 뇌파가 아니라 DC 약 4200uV에 비례하는 상수로 나왔고(alpha 200 고정 결함), 영위상 필터로 바꿔도 시작 위상에 따라 회복률이 94.4에서 97.7%로 흔들려 위상 안정성 테스트가 실패한다.
+- **적분은 직사각형 합이다.** 사다리꼴(`np.trapezoid`)로 바꾸지 말 것. 이산 PSD 빈에서 파세발 관계를 정확히 지키는 것은 직사각형 합이며, 사다리꼴은 대역 경계 빈 가중치를 절반으로 깎아 delta 1Hz 회복률을 91.3%에서 70.7%로 떨어뜨린다. `test_band_sum_matches_total_rms`가 이 계약을 지킨다.
+- **RMS 규모** — 정상 측정에서 한 자리수에서 십 단위다. 20uV 알파 정현파 1초 창의 alpha는 14.14(참값의 100%)다. 세 자리수(예: alpha 200 고정)가 나오면 DC 오프셋 또는 인과 필터 과도응답 결함이다. 라이브 뇌파의 절대 규모는 실기기 검증 전까지 미확인이므로 위 수치는 합성 신호 기준이다.
+- **delta 정확도 주의** — 1초 창에서 회복률이 2Hz 이상은 100%이나 1Hz 91.3%, 0.7Hz 64.1%로 떨어진다. 원인은 1Hz 빈 해상도이며 창을 늘려야만 개선된다. 대역 하한 근처 성분은 과소평가되므로 대역 간 비교와 유사도 해석에 주의한다.
+- **대역 경계 겹침** — 경계는 닫힌 구간이라 4Hz, 8Hz, 30Hz 성분이 인접 두 대역에 모두 계산된다. 경계 주파수 성분만 두 번 계산되며 일반 신호의 대역 합은 전체 파워와 일치한다. 중앙 주파수 정확도를 위한 의도된 선택이다.
+- **제거된 API** — `filter_delta`부터 `filter_gamma`까지 5개 메서드와 `_butter_bandpass`는 제거됐다(Welch 경로에 "필터링된 시계열"이라는 중간 산출물이 없음). 대체는 `get_band_power(values, band)`이며 창 길이 하한을 검사한다.
+- **짧은 창 금지** — 128샘플 미만은 빈 간격이 넓어져 대역에 빈이 안 잡히고 예외 없이 0.0이 반환된다. `get_band_power`가 `ValueError`로 막는다. 라이브 경로는 `streamer`가 비오버랩으로 버퍼를 비워 항상 128이다.
 - **Synchrony** — 두 피실험자 간 뇌파 상관계수 (Pearson correlation)
 - **EmotivMetrics (MET)** — Emotiv 자체 산출 지표 6종 (focus, engagement, interest, excitement, stress, relaxation)
 - **Cortex API** — Emotiv 헤드셋과 WebSocket(wss://localhost:6868) JSON-RPC 인터페이스
@@ -238,7 +248,7 @@ mind-signal은 4레포 멀티레포 제품이므로 계획 산출물 `.plans/`�
 
 - 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
-- ID와 상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, LOCK 대기 — 주체는 사용자)
+- ID와 상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, **LOCK** — 2026-07-31 사용자 승인)
 - 소급 W-ID 매핑 정본: `mind-signal/.plans/LEGACY-REGISTRY.md`
 - 작업 폴더: `mind-signal/.plans/{WORK-ID}[-{slug}]` (예: `ANALYSIS-W001-eeg-dc-offset-removal`)
 - 상태 서술: `mind-signal/.plans/STATE.md`
