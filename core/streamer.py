@@ -47,7 +47,14 @@ COUNTER_MODULUS = 128
 # clock jump로 판정함. 0.5초는 CSV 1행(1초) 절반이라 행 단위 결측 직전에 잡힘.
 TIMESTAMP_JUMP_TOLERANCE_SEC = 0.5
 # 같은 종류의 이상을 무한히 찍지 않기 위한 상한임. 초과분은 개수만 세어 종료 요약에 남김.
+# 주의: 이 상한은 개별 이벤트에만 걸리고 stream_rollup에는 걸리지 않음. 상한만
+# 두면 초반에 소진돼 이후 구간이 통째로 무기록이 됨(2026-07-31 실측: receive_gap
+# 20건이 4.1초에서 29.1초 사이에 소진, 이후 6분 무기록).
 CONTINUITY_LOG_CAP_PER_KIND = 20
+# 롤업 주기임. 상한 없이 전 구간의 추이를 남기는 유일한 경로라 너무 길면
+# 사건 발생 구간을 좁히지 못하고, 너무 짧으면 로그가 불필요하게 늘어남.
+# 10분 측정 기준 20줄이라 부담이 없음.
+CONTINUITY_ROLLUP_INTERVAL_SEC = 30
 # 매 샘플 발생 가능한 경보의 재발행 최소 간격임. BE도 같은 status 연속 수신을
 # 억제하지만(stream-health.service.ts), Redis에 초당 128건을 던질 이유가 없음.
 HEALTH_REPUBLISH_INTERVAL_SEC = 10
@@ -373,6 +380,9 @@ class MindSignalStreamer(Cortex):
         self.dropped_samples = 0
         self.dropped_blocks = 0
         self._continuity_log_counts: dict[str, int] = {}
+        # 직전 롤업 시점의 이상 누적치임. 구간 증분 계산용
+        self._rollup_prev_counts: dict[str, int] = {}
+        self._rollup_active = False
         self._health_published_at: dict[str, float] = {}
         self._last_event_monotonic: float | None = None
         self._eeg_stale = False
@@ -537,6 +547,9 @@ class MindSignalStreamer(Cortex):
         self._watchdog_active = True
         self._start_watchdog()
 
+        # 30초 롤업 시작함 (상한 없는 전 구간 추이 기록)
+        self._start_rollup_thread()
+
         # proxy 모드 시 health 폴링 데몬 시작함
         if self.alignment_location == "proxy":
             self._start_proxy_health_monitor()
@@ -698,6 +711,66 @@ class MindSignalStreamer(Cortex):
                     "met_value_rejected",
                     {"metric": key, "value": repr(data[index])},
                 )
+
+    def _start_rollup_thread(self) -> None:
+        """30초 주기 롤업 스레드 기동함.
+
+        개별 이벤트 로그는 종류별 상한에 걸려 초반에 소진됨. 2026-07-31 회차는
+        receive_gap 20건을 측정 4.1초에서 29.1초 사이에 다 써버려 이후 6분이
+        무기록이었고, 그래서 subject 1의 전달 지연 누적을 사후에 볼 수 없었음.
+
+        이 롤업은 상한을 적용하지 않고 전 구간을 덮음. 콜백이 아니라 별도
+        스레드인 이유: 스트림이 완전히 멎으면 콜백이 안 오므로 콜백 기반
+        롤업은 바로 그 순간부터 침묵함. 스레드는 계속 찍으며 csvRows가 멈춘
+        것을 보여줌.
+        """
+        self._rollup_active = True
+
+        def loop() -> None:
+            while self._rollup_active:
+                time.sleep(CONTINUITY_ROLLUP_INTERVAL_SEC)
+                if not self._rollup_active:
+                    break
+                try:
+                    self._log_rollup()
+                except Exception as e:  # 롤업 실패가 측정을 멈추면 안 됨
+                    logger.warning(f"[CONTINUITY] 롤업 실패 (무시): {e}")
+
+        threading.Thread(target=loop, daemon=True, name="continuity-rollup").start()
+
+    def _log_rollup(self) -> None:
+        """직전 구간의 누적 지표를 상한 없이 1행으로 남김.
+
+        clockSkewSec가 핵심 필드임. 로컬 현재 시각에서 마지막 Cortex 취득
+        시각을 뺀 값이라, 이 값이 선형 증가하면 전달이 실시간보다 느려 지연이
+        쌓이는 것이고(2026-07-31 증상), 계단식으로 튀면 스트림이 멎은 것임.
+        """
+        now = time.time()
+        last_cortex = self.continuity.prev_time
+        skew = None if last_cortex is None else round(now - last_cortex, 3)
+        counts = dict(self._continuity_log_counts)
+        delta_counts = {
+            k: v - self._rollup_prev_counts.get(k, 0)
+            for k, v in counts.items()
+            if v - self._rollup_prev_counts.get(k, 0) > 0
+        }
+        self._rollup_prev_counts = counts
+
+        record = {
+            "kind": "stream_rollup",
+            "groupId": self.group_id,
+            "subjectIndex": self.subject_index,
+            "elapsedSec": round(now - self.start_time, 1),
+            "csvRows": self.csv_rows_written,
+            "eegEvents": self.continuity.events_seen,
+            # 로컬 시각과 Cortex 시각의 차이임. 지연 누적 판별의 핵심 지표
+            "clockSkewSec": skew,
+            "droppedSamples": self.dropped_samples,
+            "droppedBlocks": self.dropped_blocks,
+            # 이번 구간에 새로 발생한 이상만. 전체 누적은 종료 summary에 있음
+            "anomalyDelta": delta_counts,
+        }
+        logger.warning("[CONTINUITY] %s", json.dumps(record))
 
     def _log_continuity(self, kind: str, payload: dict) -> None:
         """연속성 이벤트를 구조화 로그 1행으로 남김 (종류별 상한 적용).
@@ -961,6 +1034,14 @@ class MindSignalStreamer(Cortex):
 
     def on_close(self, *args, **kwargs):
         self._watchdog_active = False
+        # 마지막 구간(직전 롤업 이후)을 남기고 스레드를 멈춤. 순서가 중요함 —
+        # 먼저 끄면 30초 미만의 꼬리 구간이 통째로 사라짐
+        if getattr(self, "_rollup_active", False):
+            try:
+                self._log_rollup()
+            except Exception as e:
+                logger.warning(f"[CONTINUITY] 종료 롤업 실패 (무시): {e}")
+            self._rollup_active = False
         elapsed = time.time() - self.start_time if hasattr(self, "start_time") else 0
 
         # 총 EEG 이벤트 대비 CSV 행 수를 남김. 128 이벤트당 1행이 정상이라
