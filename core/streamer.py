@@ -47,10 +47,22 @@ COUNTER_MODULUS = 128
 # clock jump로 판정함. 0.5초는 CSV 1행(1초) 절반이라 행 단위 결측 직전에 잡힘.
 TIMESTAMP_JUMP_TOLERANCE_SEC = 0.5
 # 같은 종류의 이상을 무한히 찍지 않기 위한 상한임. 초과분은 개수만 세어 종료 요약에 남김.
+# 주의: 이 상한은 개별 이벤트에만 걸리고 stream_rollup에는 걸리지 않음. 상한만
+# 두면 초반에 소진돼 이후 구간이 통째로 무기록이 됨(2026-07-31 실측: receive_gap
+# 20건이 4.1초에서 29.1초 사이에 소진, 이후 6분 무기록).
 CONTINUITY_LOG_CAP_PER_KIND = 20
+# 롤업 주기임. 상한 없이 전 구간의 추이를 남기는 유일한 경로라 너무 길면
+# 사건 발생 구간을 좁히지 못하고, 너무 짧으면 로그가 불필요하게 늘어남.
+# 10분 측정 기준 20줄이라 부담이 없음.
+CONTINUITY_ROLLUP_INTERVAL_SEC = 30
 # 매 샘플 발생 가능한 경보의 재발행 최소 간격임. BE도 같은 status 연속 수신을
 # 억제하지만(stream-health.service.ts), Redis에 초당 128건을 던질 이유가 없음.
 HEALTH_REPUBLISH_INTERVAL_SEC = 10
+# Emotiv Insight의 뇌파 채널임. CSV 채널별 컬럼 순서의 정본이며, 실제 헤드셋에
+# 일부 채널이 없어도 헤더는 이 순서 그대로 고정함(스키마 안정성).
+TARGET_EEG_CHANNELS = ["AF3", "T7", "Pz", "T8", "AF4"]
+# 대역별 컬럼 순서의 정본임. analyzer.BANDS와 같은 순서를 유지함.
+BAND_NAMES = ["delta", "theta", "alpha", "beta", "gamma"]
 
 
 class StreamContinuityTracker:
@@ -334,25 +346,29 @@ class MindSignalStreamer(Cortex):
         self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
         self.writer = csv.writer(self.csv_file)
 
+        # 앞 12열은 기존 스키마 그대로 유지함. 하류(엔진 분석, markdown, 유사도,
+        # BE coverage)가 이 이름들을 화이트리스트로 읽으므로 순서와 이름을
+        # 바꾸지 않음. 5대역 값은 채널 공간 평균 기준임.
+        # 뒤 25열은 채널별 대역 파워임. 부위별 분석을 위해 평균 전 값을 함께 남김.
+        # 미지 컬럼은 하류 화이트리스트 파서가 무시하므로 추가로 인한 회귀가 없음.
         header = [
             "timestamp",
-            "delta",
-            "theta",
-            "alpha",
-            "beta",
-            "gamma",
+            *BAND_NAMES,
             "focus",
             "engagement",
             "interest",
             "excitement",
             "stress",
             "relaxation",
+            *[f"{ch}_{band}" for ch in TARGET_EEG_CHANNELS for band in BAND_NAMES],
         ]
         self.writer.writerow(header)
 
         # 4. 런타임 매핑, 상태 변수 및 버퍼 초기화 수행함
         self.met_map = {}
         self.eeg_channel_indices = []
+        # eeg_channel_indices와 같은 순서의 채널 이름임. 버퍼 열과 채널을 잇는 키임
+        self.eeg_channel_names = []
         self.eeg_buffer = []
 
         # 스트림 연속성 계측 상태 초기화함 (P0-1). COUNTER와 INTERPOLATED 인덱스는
@@ -364,6 +380,16 @@ class MindSignalStreamer(Cortex):
         self.dropped_samples = 0
         self.dropped_blocks = 0
         self._continuity_log_counts: dict[str, int] = {}
+        # 직전 롤업 시점의 이상 누적치임. 구간 증분 계산용
+        self._rollup_prev_counts: dict[str, int] = {}
+        self._rollup_active = False
+        # 롤업 스레드와 종료 경로가 _log_rollup을 동시에 부르면 증분 계산의
+        # 스냅샷과 교체 사이가 갈라져 anomalyDelta가 중복 계상되거나 구간
+        # 경계가 깨짐. 두 호출을 직렬화함
+        self._rollup_lock = threading.Lock()
+        # sleep 대신 이 이벤트를 기다림. 종료 시 최대 30초를 기다리지 않고
+        # 즉시 깨어남
+        self._rollup_stop = threading.Event()
         self._health_published_at: dict[str, float] = {}
         self._last_event_monotonic: float | None = None
         self._eeg_stale = False
@@ -485,11 +511,20 @@ class MindSignalStreamer(Cortex):
                 print(f"[WARN] MET 라벨 미발견: {missing} (labels={labels})")
 
         elif stream_name == "eeg":
-            target_eeg_channels = ["AF3", "T7", "Pz", "T8", "AF4"]
+            # 이름과 인덱스를 같은 순서로 함께 보존함. 채널이 하나라도 빠지면
+            # 인덱스 목록만으로는 버퍼 열이 어느 채널인지 알 수 없어 채널별
+            # 대역 파워를 잘못된 컬럼에 쓰게 됨
+            self.eeg_channel_names = [ch for ch in TARGET_EEG_CHANNELS if ch in labels]
             self.eeg_channel_indices = [
-                labels.index(ch) for ch in target_eeg_channels if ch in labels
+                labels.index(ch) for ch in self.eeg_channel_names
             ]
-            print(f"EEG 채널 인덱스 매핑 완료됨: {self.eeg_channel_indices}")
+            print(
+                f"EEG 채널 인덱스 매핑 완료됨: "
+                f"{dict(zip(self.eeg_channel_names, self.eeg_channel_indices))}"
+            )
+            missing_eeg = [ch for ch in TARGET_EEG_CHANNELS if ch not in labels]
+            if missing_eeg:
+                print(f"[WARN] EEG 채널 미발견: {missing_eeg} (해당 컬럼은 공란임)")
 
             # 연속성 계측용 메타 채널 인덱스 확보함. 없으면 계측만 비활성되고
             # 측정 자체는 그대로 진행함.
@@ -518,6 +553,9 @@ class MindSignalStreamer(Cortex):
         # watchdog 타이머 시작함 (무데이터 감지)
         self._watchdog_active = True
         self._start_watchdog()
+
+        # 30초 롤업 시작함 (상한 없는 전 구간 추이 기록)
+        self._start_rollup_thread()
 
         # proxy 모드 시 health 폴링 데몬 시작함
         if self.alignment_location == "proxy":
@@ -681,6 +719,99 @@ class MindSignalStreamer(Cortex):
                     {"metric": key, "value": repr(data[index])},
                 )
 
+    def _finite_or_blank(
+        self, channel_powers: dict, channel: str, band: str
+    ) -> float | str:
+        """채널별 대역 값이 유한하면 그대로, 아니면 공란 반환함.
+
+        평균값 5대역은 행 단위 유한성 검사를 이미 거치지만(non_finite_power로
+        행 전체를 버림) 채널별 값은 그 검사 대상이 아님. 채널 하나가 비유한이어도
+        나머지 채널은 유효하므로 행을 버리지 않고 해당 셀만 비움. 비우지 않으면
+        "nan" 문자열이 CSV에 박혀 하류 파서를 오염시킴.
+
+        Args:
+            channel_powers: 채널 이름을 키로 하는 대역 파워 dict임
+            channel: 대상 채널 이름임
+            band: 대상 대역 이름임
+
+        Returns:
+            유한한 값 또는 빈 문자열 반환
+        """
+        value = channel_powers.get(channel, {}).get(band)
+        if value is None:
+            return ""
+        if not np.isfinite(value):
+            self._log_continuity(
+                "channel_power_non_finite",
+                {"channel": channel, "band": band, "value": repr(value)},
+            )
+            return ""
+        return value
+
+    def _start_rollup_thread(self) -> None:
+        """30초 주기 롤업 스레드 기동함.
+
+        개별 이벤트 로그는 종류별 상한에 걸려 초반에 소진됨. 2026-07-31 회차는
+        receive_gap 20건을 측정 4.1초에서 29.1초 사이에 다 써버려 이후 6분이
+        무기록이었고, 그래서 subject 1의 전달 지연 누적을 사후에 볼 수 없었음.
+
+        이 롤업은 상한을 적용하지 않고 전 구간을 덮음. 콜백이 아니라 별도
+        스레드인 이유: 스트림이 완전히 멎으면 콜백이 안 오므로 콜백 기반
+        롤업은 바로 그 순간부터 침묵함. 스레드는 계속 찍으며 csvRows가 멈춘
+        것을 보여줌.
+        """
+        self._rollup_active = True
+        self._rollup_stop.clear()
+
+        def loop() -> None:
+            # wait는 이벤트가 설정되면 True를 반환함. 즉 종료 신호가 오면
+            # 남은 대기를 건너뛰고 즉시 빠져나감
+            while not self._rollup_stop.wait(CONTINUITY_ROLLUP_INTERVAL_SEC):
+                try:
+                    with self._rollup_lock:
+                        self._log_rollup()
+                except Exception as e:  # 롤업 실패가 측정을 멈추면 안 됨
+                    logger.warning(f"[CONTINUITY] 롤업 실패 (무시): {e}")
+
+        self._rollup_thread = threading.Thread(
+            target=loop, daemon=True, name="continuity-rollup"
+        )
+        self._rollup_thread.start()
+
+    def _log_rollup(self) -> None:
+        """직전 구간의 누적 지표를 상한 없이 1행으로 남김.
+
+        clockSkewSec가 핵심 필드임. 로컬 현재 시각에서 마지막 Cortex 취득
+        시각을 뺀 값이라, 이 값이 선형 증가하면 전달이 실시간보다 느려 지연이
+        쌓이는 것이고(2026-07-31 증상), 계단식으로 튀면 스트림이 멎은 것임.
+        """
+        now = time.time()
+        last_cortex = self.continuity.prev_time
+        skew = None if last_cortex is None else round(now - last_cortex, 3)
+        counts = dict(self._continuity_log_counts)
+        delta_counts = {
+            k: v - self._rollup_prev_counts.get(k, 0)
+            for k, v in counts.items()
+            if v - self._rollup_prev_counts.get(k, 0) > 0
+        }
+        self._rollup_prev_counts = counts
+
+        record = {
+            "kind": "stream_rollup",
+            "groupId": self.group_id,
+            "subjectIndex": self.subject_index,
+            "elapsedSec": round(now - self.start_time, 1),
+            "csvRows": self.csv_rows_written,
+            "eegEvents": self.continuity.events_seen,
+            # 로컬 시각과 Cortex 시각의 차이임. 지연 누적 판별의 핵심 지표
+            "clockSkewSec": skew,
+            "droppedSamples": self.dropped_samples,
+            "droppedBlocks": self.dropped_blocks,
+            # 이번 구간에 새로 발생한 이상만. 전체 누적은 종료 summary에 있음
+            "anomalyDelta": delta_counts,
+        }
+        logger.warning("[CONTINUITY] %s", json.dumps(record))
+
     def _log_continuity(self, kind: str, payload: dict) -> None:
         """연속성 이벤트를 구조화 로그 1행으로 남김 (종류별 상한 적용).
 
@@ -790,11 +921,19 @@ class MindSignalStreamer(Cortex):
             # 공간(채널) 평균을 내어 1차원 시간 신호(길이 128)로 변환함
             mean_eeg_time_series = np.mean(buffer_arr, axis=1)
 
-            # 시계열 데이터를 필터에 통과시켜 파워 대역 계산함
+            # 시계열 데이터의 PSD를 구해 대역 파워 계산함
             powers = self.analyzer.get_all_powers(mean_eeg_time_series)
 
-            # 필터는 대역별 독립 계산이라 샘플이 전부 유한해도 overflow로 한
-            # 대역만 비유한이 될 수 있음. 그 행은 쓰지 않고 버림 — coverage 계약이
+            # 평균으로 뭉개기 전 채널별 대역 파워도 함께 산출함. 부위별 분석
+            # (예: 전두엽 알파 대 후두엽 알파)이 평균값만으로는 불가능해서임.
+            # 채널 하나가 불량이어도 나머지는 유효하므로 채널별로 독립 계산함
+            channel_powers = {
+                name: self.analyzer.get_all_powers(buffer_arr[:, col])
+                for col, name in enumerate(self.eeg_channel_names)
+            }
+
+            # 5대역이 같은 PSD를 공유하므로 비유한 입력은 전 대역에 전파됨
+            # (실측 확인). 그 행은 쓰지 않고 버림 — coverage 계약이
             # "요청 대역 중 하나라도 비유한이면 그 초 전체 무효"라 어차피 못 씀.
             # 시각도 함께 검사함. 불량 cortex_time은 fromtimestamp()에서 예외를 내
             # 콜백 자체를 죽임 (이후 이벤트가 전부 유실됨). 유한성만으로는 부족해서
@@ -827,21 +966,24 @@ class MindSignalStreamer(Cortex):
             # Cortex 타임스탬프를 문자열로 변환함 (위 검사에서 변환된 값 재사용)
             formatted_time = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
 
-            # 1. CSV 기록 수행함
+            # 1. CSV 기록 수행함.
+            # 채널별 컬럼은 TARGET_EEG_CHANNELS 순서로 고정하고, 헤드셋에 없는
+            # 채널은 공란으로 남김. 헤더가 회차마다 달라지면 하류 파서가 깨짐
             self.writer.writerow(
                 [
                     formatted_time,
-                    powers["delta"],
-                    powers["theta"],
-                    powers["alpha"],
-                    powers["beta"],
-                    powers["gamma"],
+                    *[powers[band] for band in BAND_NAMES],
                     self.latest_met["focus"],
                     self.latest_met["engagement"],
                     self.latest_met["interest"],
                     self.latest_met["excitement"],
                     self.latest_met["stress"],
                     self.latest_met["relaxation"],
+                    *[
+                        self._finite_or_blank(channel_powers, ch, band)
+                        for ch in TARGET_EEG_CHANNELS
+                        for band in BAND_NAMES
+                    ],
                 ]
             )
             self.csv_file.flush()
@@ -932,6 +1074,23 @@ class MindSignalStreamer(Cortex):
 
     def on_close(self, *args, **kwargs):
         self._watchdog_active = False
+        # 롤업 스레드를 먼저 멈춘 뒤 마지막 구간(직전 롤업 이후)을 남김.
+        # 순서가 중요함 — 스레드를 안 멈추고 기록하면 두 호출이 증분 계산의
+        # 스냅샷과 교체 사이에서 갈라짐. 반대로 기록을 생략하면 30초 미만의
+        # 꼬리 구간이 통째로 사라짐
+        if getattr(self, "_rollup_active", False):
+            self._rollup_active = False
+            self._rollup_stop.set()
+            thread = getattr(self, "_rollup_thread", None)
+            if thread is not None and thread.is_alive():
+                # 대기 중이면 이벤트로 즉시 깨어나고, 기록 중이면 그것이 끝날
+                # 때까지만 기다림. 종료 경로를 오래 붙잡지 않도록 상한을 둠
+                thread.join(timeout=5)
+            try:
+                with self._rollup_lock:
+                    self._log_rollup()
+            except Exception as e:
+                logger.warning(f"[CONTINUITY] 종료 롤업 실패 (무시): {e}")
         elapsed = time.time() - self.start_time if hasattr(self, "start_time") else 0
 
         # 총 EEG 이벤트 대비 CSV 행 수를 남김. 128 이벤트당 1행이 정상이라
