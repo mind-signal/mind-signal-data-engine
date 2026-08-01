@@ -426,10 +426,14 @@ def test_concurrent_get_shared_client_constructs_once(
     thread_count = 8
     barrier = threading.Barrier(thread_count)
     results: list[object] = [None] * thread_count
+    errors: list[tuple[int, BaseException]] = []
 
     def worker(idx: int) -> None:
-        barrier.wait()
-        results[idx] = proxy_client.get_shared_client()
+        try:
+            barrier.wait()
+            results[idx] = proxy_client.get_shared_client()
+        except BaseException as exc:  # 진단 목적으로 캡처함
+            errors.append((idx, exc))
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
     for thread in threads:
@@ -437,6 +441,7 @@ def test_concurrent_get_shared_client_constructs_once(
     for thread in threads:
         thread.join()
 
+    assert not errors, f"워커 스레드에서 예외 발생: {errors}"
     assert all(
         result is results[0] for result in results
     ), "스레드마다 다른 Client 반환됨"
