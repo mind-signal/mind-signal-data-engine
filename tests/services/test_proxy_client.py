@@ -298,3 +298,111 @@ def test_tracker_healthy_after_trip_resets_to_false() -> None:
     assert tracker.record(False, 5.0) is False  # 첫 fail — threshold 미도달
     assert tracker.record(False, 7.999) is False  # 2999ms 미도달
     assert tracker.record(False, 8.0) is True  # 3000ms 도달 — True
+
+
+# ──────────────────────────────────────────────
+# T-PC-8: Client 재사용 회귀 (EEG-W003)
+#
+# 결함: post_sample이 호출마다 httpx.Client를 새로 만들어 매번 SSL 컨텍스트를
+# 재구성했고, PC A 실측 약 690ms가 소요됐음. 128샘플 블록당 1초 예산을 잠식해
+# Cortex 수신 백로그가 초당 약 0.2초씩 누적됐음(10분 측정에 약 100초 지연).
+# 실측 근거: httpx.Client() 생성만 694ms, 재사용 시 POST 왕복 5.3ms.
+# 아래 테스트는 "호출 횟수와 무관하게 Client 생성은 1회"를 잠금.
+# ──────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _reset_shared_client():
+    """테스트 간 공용 Client 격리함 — mock transport가 새 Client에 적용되게 함.
+
+    getattr 폴백은 공용 Client가 없는 구현에서도 나머지 테스트가 정상 실행되어
+    본 회귀 테스트가 AttributeError가 아니라 생성 횟수로 실패하게 하려는 것임.
+    """
+    from server.services import proxy_client
+
+    reset = getattr(proxy_client, "close_shared_client", lambda: None)
+    reset()
+    yield
+    reset()
+
+
+def _count_client_constructions(monkeypatch) -> list[int]:
+    """httpx.Client 생성 횟수를 세는 카운터 설치하고 리스트로 반환함"""
+    import httpx
+
+    from server.services import proxy_client
+
+    calls = [0]
+    real_client = httpx.Client
+
+    def counting_client(*args, **kwargs):
+        calls[0] += 1
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(proxy_client.httpx, "Client", counting_client)
+    return calls
+
+
+def test_post_sample_reuses_single_client(httpx_mock: HTTPXMock, monkeypatch) -> None:
+    """post_sample 3회 호출 시 httpx.Client 생성은 1회뿐임을 확인함"""
+    from server.services import proxy_client
+
+    monkeypatch.setattr(proxy_client.time, "monotonic_ns", lambda: FIXED_TS_NS)
+    calls = _count_client_constructions(monkeypatch)
+
+    for _ in range(3):
+        httpx_mock.add_response(url=INGEST_SAMPLE_URL, method="POST", status_code=200)
+
+    for seq in range(3):
+        proxy_client.post_sample(
+            proxy_url=MOCK_PROXY_URL,
+            secret_key=MOCK_SECRET_KEY,
+            group_id=MOCK_GROUP_ID,
+            subject_idx=MOCK_SUBJECT_IDX,
+            seq=seq,
+            payload=MOCK_PAYLOAD,
+            sync_meta=MOCK_SYNC_META,
+        )
+
+    assert len(httpx_mock.get_requests(url=INGEST_SAMPLE_URL)) == 3
+    assert calls[0] == 1, f"Client 생성이 {calls[0]}회 — 호출마다 생성하면 안 됨"
+
+
+def test_check_health_reuses_same_client_as_post_sample(
+    httpx_mock: HTTPXMock, monkeypatch
+) -> None:
+    """check_health와 post_sample이 같은 Client를 공유함을 확인함"""
+    from server.services import proxy_client
+
+    monkeypatch.setattr(proxy_client.time, "monotonic_ns", lambda: FIXED_TS_NS)
+    calls = _count_client_constructions(monkeypatch)
+
+    httpx_mock.add_response(
+        url=f"{MOCK_PROXY_URL}/health", method="GET", status_code=200
+    )
+    httpx_mock.add_response(url=INGEST_SAMPLE_URL, method="POST", status_code=200)
+
+    assert proxy_client.check_health(MOCK_PROXY_URL) is True
+    proxy_client.post_sample(
+        proxy_url=MOCK_PROXY_URL,
+        secret_key=MOCK_SECRET_KEY,
+        group_id=MOCK_GROUP_ID,
+        subject_idx=MOCK_SUBJECT_IDX,
+        seq=MOCK_SEQ,
+        payload=MOCK_PAYLOAD,
+        sync_meta=MOCK_SYNC_META,
+    )
+
+    assert calls[0] == 1, f"Client 생성이 {calls[0]}회 — 두 경로가 공유해야 함"
+
+
+def test_close_shared_client_allows_recreation() -> None:
+    """close 후 재요청 시 새 Client가 생성되어 재사용 가능함을 확인함"""
+    from server.services import proxy_client
+
+    first = proxy_client.get_shared_client()
+    assert proxy_client.get_shared_client() is first
+
+    proxy_client.close_shared_client()
+
+    second = proxy_client.get_shared_client()
+    assert second is not first
+    assert second.is_closed is False

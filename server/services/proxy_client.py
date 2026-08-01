@@ -4,9 +4,38 @@ Emotiv Cortex SDK 콜백(동기 스레드)에서 직접 호출되므로 httpx.Cl
 AsyncClient 사용 금지 — 동기 스레드에서 이벤트 루프 없이 호출됨.
 """
 
+import threading
 import time
 
 import httpx
+
+_client_lock = threading.Lock()
+_shared_client: httpx.Client | None = None
+
+
+def get_shared_client() -> httpx.Client:
+    """모듈 공용 httpx.Client 반환함 (미생성 시 생성).
+
+    호출마다 Client를 새로 만들면 그때마다 SSL 컨텍스트를 새로 구성하며
+    certifi CA 번들 약 271KB를 다시 파싱함. PC A 실측 약 690ms 소요됨.
+    이 비용이 128샘플 블록당 1초 예산을 잠식해 수신 백로그가 초당 약 0.2초씩
+    누적됐음 (EEG-W003, 10분 측정에 약 100초 지연). 재사용 시 같은 POST가
+    약 5ms로 떨어짐.
+    """
+    global _shared_client
+    with _client_lock:
+        if _shared_client is None or _shared_client.is_closed:
+            _shared_client = httpx.Client(timeout=10)
+        return _shared_client
+
+
+def close_shared_client() -> None:
+    """공용 Client 해제함 (프로세스 종료와 테스트 격리용)"""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is not None:
+            _shared_client.close()
+            _shared_client = None
 
 
 class ProxyForwardError(Exception):
@@ -26,9 +55,8 @@ def check_health(proxy_url: str, timeout: float = 5.0) -> bool:
         HTTP 200 응답 시 True, 그 외(503/비200/네트워크 오류) False 반환함.
     """
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(f"{proxy_url}/health")
-            return response.status_code == 200
+        response = get_shared_client().get(f"{proxy_url}/health", timeout=timeout)
+        return response.status_code == 200
     except httpx.RequestError:
         return False
 
@@ -135,19 +163,20 @@ def post_sample(
             time.sleep(wait_sec)
 
         try:
-            with httpx.Client(timeout=10) as client:
-                response = client.post(
-                    f"{proxy_url}/ingest/sample",
-                    headers={
-                        "X-Engine-Secret": secret_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
-                # 4xx/5xx 응답 시 HTTPStatusError raise함
-                response.raise_for_status()
-                # 전송 성공 — 즉시 반환함
-                return
+            # 공용 Client 재사용함 — 호출마다 생성하면 SSL 컨텍스트 재구성으로
+            # 블록당 예산을 잠식함 (get_shared_client docstring 참조)
+            response = get_shared_client().post(
+                f"{proxy_url}/ingest/sample",
+                headers={
+                    "X-Engine-Secret": secret_key,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            # 4xx/5xx 응답 시 HTTPStatusError raise함
+            response.raise_for_status()
+            # 전송 성공 — 즉시 반환함
+            return
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
             # 네트워크 오류 또는 상태 코드 오류 — retry 대상임
             last_exc = exc
