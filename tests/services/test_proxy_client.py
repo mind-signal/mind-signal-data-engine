@@ -2,6 +2,8 @@
 
 import inspect
 import json
+import threading
+from typing import Any, Generator
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -310,7 +312,7 @@ def test_tracker_healthy_after_trip_resets_to_false() -> None:
 # 아래 테스트는 "호출 횟수와 무관하게 Client 생성은 1회"를 잠금.
 # ──────────────────────────────────────────────
 @pytest.fixture(autouse=True)
-def _reset_shared_client():
+def _reset_shared_client() -> Generator[None, None, None]:
     """테스트 간 공용 Client 격리함 — mock transport가 새 Client에 적용되게 함.
 
     getattr 폴백은 공용 Client가 없는 구현에서도 나머지 테스트가 정상 실행되어
@@ -324,7 +326,7 @@ def _reset_shared_client():
     reset()
 
 
-def _count_client_constructions(monkeypatch) -> list[int]:
+def _count_client_constructions(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """httpx.Client 생성 횟수를 세는 카운터 설치하고 리스트로 반환함"""
     import httpx
 
@@ -333,7 +335,7 @@ def _count_client_constructions(monkeypatch) -> list[int]:
     calls = [0]
     real_client = httpx.Client
 
-    def counting_client(*args, **kwargs):
+    def counting_client(*args: Any, **kwargs: Any) -> httpx.Client:
         calls[0] += 1
         return real_client(*args, **kwargs)
 
@@ -392,6 +394,53 @@ def test_check_health_reuses_same_client_as_post_sample(
     )
 
     assert calls[0] == 1, f"Client 생성이 {calls[0]}회 — 두 경로가 공유해야 함"
+
+
+def test_concurrent_get_shared_client_constructs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """여러 스레드가 동시에 진입해도 Client는 1개만 생성됨을 확인함.
+
+    get_shared_client가 락 없이 None 검사와 대입을 하면 첫 호출들이 겹칠 때
+    각자 Client를 만들고 마지막 하나만 남아 나머지가 누수됨. Barrier로 동시
+    진입을 강제해 그 경합을 재현함.
+    """
+    from server.services import proxy_client
+
+    # 실물 Client 대신 더미를 세움 — 실물 생성은 CA 번들을 읽어 파일시스템에
+    # 의존하고, 이 테스트는 HTTP가 아니라 생성 횟수와 동일성만 검증함
+    calls = [0]
+
+    class _DummyClient:
+        is_closed = False
+
+        def close(self) -> None:
+            pass
+
+    def counting_client(*args: Any, **kwargs: Any) -> Any:
+        calls[0] += 1
+        return _DummyClient()
+
+    monkeypatch.setattr(proxy_client.httpx, "Client", counting_client)
+
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    results: list[object] = [None] * thread_count
+
+    def worker(idx: int) -> None:
+        barrier.wait()
+        results[idx] = proxy_client.get_shared_client()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert all(
+        result is results[0] for result in results
+    ), "스레드마다 다른 Client 반환됨"
+    assert calls[0] == 1, f"Client 생성이 {calls[0]}회 — 동시 진입에도 1회여야 함"
 
 
 def test_close_shared_client_allows_recreation() -> None:
