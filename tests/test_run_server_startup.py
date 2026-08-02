@@ -20,11 +20,13 @@ def test_dev_reload_one_enables(monkeypatch):
     assert run_server._dev_reload() is True
 
 
-def test_io_env_defaults_to_utf8(monkeypatch):
-    """미설정 환경에서 자식 프로세스용 utf-8 기본값 주입함."""
+def test_io_env_defaults_are_injected(monkeypatch):
+    """미설정 환경에서 자식 프로세스용 기본값 둘 다 주입함."""
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
     run_server._apply_io_env()
     assert run_server.os.environ["PYTHONIOENCODING"] == "utf-8"
+    assert run_server.os.environ["PYTHONUNBUFFERED"] == "1"
 
 
 def test_explicit_io_env_is_preserved(monkeypatch):
