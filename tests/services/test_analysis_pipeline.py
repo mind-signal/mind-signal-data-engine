@@ -453,6 +453,8 @@ class TestRunFullPipeline:
             "pair_features",
             "y_score",
             "synchrony_score",
+            "friendship_score",
+            "score_params",
             "pipeline_params",
             "dataframes",
         }

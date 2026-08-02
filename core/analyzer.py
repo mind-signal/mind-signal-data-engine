@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.signal import welch
+from scipy.stats import spearmanr
 
 
 class MindSignalAnalyzer:
@@ -48,10 +49,31 @@ class MindSignalAnalyzer:
         return faa_score
 
     @staticmethod
-    def calculate_synchrony(user1_eeg, user2_eeg):
-        """두 사용자 간의 뇌파 동기화(Correlation) 계산"""
-        correlation = np.corrcoef(user1_eeg, user2_eeg)[0, 1]
-        return correlation
+    def calculate_synchrony(user1_eeg, user2_eeg, method: str = "pearson"):
+        """두 사용자 간의 뇌파 동조율 계산함.
+
+        **상관 계산은 이 메서드 한 곳으로만 들어감.** 호출부가 scipy를 직접
+        부르면 여기를 mock한 기존 테스트가 조용히 무력화됨.
+
+        Args:
+            user1_eeg: 첫 피실험자 시계열임
+            user2_eeg: 둘째 피실험자 시계열임
+            method: "pearson" 또는 "spearman"임. 정본 수식은 스피어만 순위상관
+
+        Returns:
+            상관계수 반환. 한쪽이 상수면 nan이 나올 수 있으므로 호출부가
+            유한성을 확인해야 함
+
+        Raises:
+            ValueError: 미지원 method임
+        """
+        if method == "pearson":
+            return np.corrcoef(user1_eeg, user2_eeg)[0, 1]
+        if method == "spearman":
+            # 순위상관은 단조 변환에 불변이라 대역 값이 파워인지 RMS인지에
+            # 영향받지 않음. nan_policy는 결측 쌍만 제외함
+            return spearmanr(user1_eeg, user2_eeg, nan_policy="omit").statistic
+        raise ValueError(f"미지원 상관 방식 {method!r}")
 
     def __init__(self, sampling_rate: int = 128) -> None:
         # Emotiv Insight의 샘플링 레이트는 초당 128Hz임

@@ -1,5 +1,4 @@
 import logging
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from math import ceil
@@ -9,18 +8,31 @@ import numpy as np
 import pandas as pd
 
 from core.analyzer import MindSignalAnalyzer
+from server.services.friendship import compute_friendship_score
+from server.services.score_params import ScoreParams
 
 logger = logging.getLogger(__name__)
 
 # CSV 저장 기본 경로 (streamer.py와 동일한 위치)
 CSV_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "csv"
 
-# 측정 진정 구간 — 분석 제외, 표시만 함
-TRIM_START_SECONDS = 15
-TRIM_END_SECONDS = 15
+# 구간 상수의 정본은 ScoreParams임. 아래 세 이름은 하위 호환 별칭이며
+# **import 시점 스냅샷**이라 이후의 환경변수 변경을 반영하지 않음.
+# 런타임 값이 필요하면 ScoreParams.from_env()를 호출할 것
+_DEFAULT_PARAMS = ScoreParams.from_env()
 
-# 최소 분석 가능 시간 (trimming 후 유효 구간 기준, 임시값 — 교수 확인 후 확정)
-MIN_ANALYSIS_SECONDS = int(os.getenv("MIN_ANALYSIS_SECONDS", 180))
+# 측정 진정 구간 — 분석 제외, 표시만 함
+TRIM_START_SECONDS = _DEFAULT_PARAMS.trim_start_sec
+TRIM_END_SECONDS = _DEFAULT_PARAMS.trim_end_sec
+
+# 최소 분석 가능 시간 (trimming 후 유효 구간 기준, 임시값 — 교수 확인 후 확정).
+# 실제 필요 측정 시간은 여기에 앞뒤 trim을 더한 ScoreParams.required_total_sec임
+MIN_ANALYSIS_SECONDS = _DEFAULT_PARAMS.min_analysis_sec
+
+
+def _resolve_params(params: ScoreParams | None) -> ScoreParams:
+    """생략된 파라미터를 모듈 기본값으로 채움"""
+    return params if params is not None else _DEFAULT_PARAMS
 
 
 class AnalysisContractError(Exception):
@@ -44,16 +56,20 @@ class WindowSlot:
     data: pd.DataFrame | None
 
 
-def classify_session_tier(total_samples: int) -> str:
+def classify_session_tier(total_samples: int, params: ScoreParams | None = None) -> str:
     """측정 시간 기반 세션 tier를 분류함 (1행 = 1초 가정)
 
+    판정 기준은 trim 이후 유효 구간이므로, VALID에 필요한 총 측정 시간은
+    params.required_total_sec임(기본값 210초). trim을 바꾸면 함께 흔들림.
+
     Returns:
-        "VALID" — 유효 구간 ≥ MIN_ANALYSIS_SECONDS
-        "PARTIAL" — trimming 후 > 0초, < MIN
-        "ABORTED" — trimming 후 ≤ 0초
+        "VALID" — 유효 구간이 min_analysis_sec 이상임
+        "PARTIAL" — trimming 후 0초 초과, 최소 미만임
+        "ABORTED" — trimming 후 0초 이하임
     """
-    effective = total_samples - TRIM_START_SECONDS - TRIM_END_SECONDS
-    if effective >= MIN_ANALYSIS_SECONDS:
+    resolved = _resolve_params(params)
+    effective = total_samples - resolved.trim_start_sec - resolved.trim_end_sec
+    if effective >= resolved.min_analysis_sec:
         return "VALID"
     elif effective > 0:
         return "PARTIAL"
@@ -61,19 +77,24 @@ def classify_session_tier(total_samples: int) -> str:
         return "ABORTED"
 
 
-def trim_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def trim_dataframe(
+    df: pd.DataFrame, params: ScoreParams | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """진정 구간 trimming 수행함
 
     Returns:
         (trimmed_df, baseline_df)
-        - trimmed_df: 유효 분석 구간 (시작 15초 ~ 종료-15초)
-        - baseline_df: 시작 15초 구간 (기저 뇌파 참조용)
+        - trimmed_df: 유효 분석 구간 (시작 trim 이후부터 종료 trim 이전까지)
+        - baseline_df: 시작 trim 구간 (기저 뇌파 참조용)
     """
+    resolved = _resolve_params(params)
     total = len(df)
-    end_trim = max(0, total - TRIM_END_SECONDS)
+    end_trim = max(0, total - resolved.trim_end_sec)
 
-    baseline_df = df.iloc[:TRIM_START_SECONDS].copy()
-    trimmed_df = df.iloc[TRIM_START_SECONDS:end_trim].copy().reset_index(drop=True)
+    baseline_df = df.iloc[: resolved.trim_start_sec].copy()
+    trimmed_df = (
+        df.iloc[resolved.trim_start_sec : end_trim].copy().reset_index(drop=True)
+    )
 
     return trimmed_df, baseline_df
 
@@ -185,39 +206,114 @@ def align_on_second(
     return frames[0].merge(frames[1], on="sec", how="inner", suffixes=("_1", "_2"))
 
 
-def compute_synchrony(df1: pd.DataFrame, df2: pd.DataFrame) -> float | None:
-    """두 피실험자 간 뇌파 동기화 점수를 계산함 (trimming 적용).
+MIN_SYNCHRONY_PAIRS = 10
 
-    각 피실험자의 진정 구간을 먼저 제거한 뒤 공통 절대시각 구간만 비교함.
-    측정 시작 시각이 어긋나도(2026-07-10 라이브: 38.3초 차이) 같은 시각끼리
-    맞대므로 시차가 상관에 섞이지 않음.
+
+def resolve_sync_column(
+    df1: pd.DataFrame, df2: pd.DataFrame, params: ScoreParams
+) -> str | None:
+    """양쪽 DataFrame에 모두 있는 동조 대상 열을 우선순위대로 고름.
+
+    정본은 Pz 감마지만 채널별 열은 현행 37열 CSV에만 있음. 구형 CSV에서는
+    공간평균 열로 폴백하되 **무엇을 썼는지 호출부가 결과에 남겨야 함** —
+    조용한 폴백은 나중에 "왜 점수가 다르지"를 만듦.
+
+    Returns:
+        선택된 열 이름 반환. 후보가 하나도 없으면 None 반환
     """
+    for candidate in params.sync_column_candidates:
+        if candidate in df1.columns and candidate in df2.columns:
+            return candidate
+    return None
+
+
+def _correlate_pair(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    column: str,
+    params: ScoreParams,
+) -> tuple[float | None, int]:
+    """지정 열의 두 시계열을 정렬해 상관과 유효 쌍 수를 반환함"""
     analyzer = MindSignalAnalyzer()
-
-    # trimming 적용 — 진정 구간 제외한 유효 구간만 사용함
-    trimmed1, _ = trim_dataframe(df1)
-    trimmed2, _ = trim_dataframe(df2)
-
-    aligned = align_on_second(trimmed1, trimmed2, "alpha")
+    aligned = align_on_second(df1, df2, column)
 
     if aligned is None:
         # timestamp 부재 시 구 위치 정렬로 폴백함 (합성 픽스처 호환)
         logger.warning("timestamp 컬럼 부재로 위치 기반 정렬 폴백함")
-        min_len = min(len(trimmed1), len(trimmed2))
-        if min_len < 10:
-            return None
-        alpha1 = trimmed1["alpha"].values[:min_len]
-        alpha2 = trimmed2["alpha"].values[:min_len]
-        return float(analyzer.calculate_synchrony(alpha1, alpha2))
+        min_len = min(len(df1), len(df2))
+        if min_len < MIN_SYNCHRONY_PAIRS:
+            return None, min_len
+        series1 = df1[column].values[:min_len]
+        series2 = df2[column].values[:min_len]
+        n_pairs = min_len
+    else:
+        if len(aligned) < MIN_SYNCHRONY_PAIRS:
+            return None, len(aligned)
+        series1 = aligned[f"{column}_1"].values
+        series2 = aligned[f"{column}_2"].values
+        n_pairs = len(aligned)
 
-    if len(aligned) < 10:
-        return None
+    rho = analyzer.calculate_synchrony(series1, series2, method=params.corr_method)
+    # 한쪽이 상수면 상관이 nan임. 그대로 흘리면 응답 직렬화에서 터지므로
+    # 미측정으로 낮춤(_finite_mask 주석의 Inf 사례와 같은 계열)
+    if rho is None or not np.isfinite(rho):
+        return None, n_pairs
+    return float(rho), n_pairs
 
-    return float(
-        analyzer.calculate_synchrony(
-            aligned["alpha_1"].values, aligned["alpha_2"].values
-        )
-    )
+
+def compute_synchrony(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    params: ScoreParams | None = None,
+) -> tuple[float | None, dict]:
+    """두 피실험자 간 뇌파 동조율을 계산함 (trimming 적용).
+
+    각 피실험자의 진정 구간을 먼저 제거한 뒤 공통 절대시각 구간만 비교함.
+    측정 시작 시각이 어긋나도(2026-07-10 라이브: 38.3초 차이) 같은 시각끼리
+    맞대므로 시차가 상관에 섞이지 않음.
+
+    입력은 반드시 원본 CSV DataFrame임. average_by_timestamp를 거친 쪽은
+    band_cols만 남아 채널별 열이 사라짐.
+
+    Returns:
+        (동조율 또는 None, 메타 dict) 튜플 반환. 메타에는 사용한 열과 유효 쌍
+        수, 상관 방식, 그리고 공간평균 기준 병기값(sync_secondary)이 담김
+    """
+    resolved = _resolve_params(params)
+
+    # trimming 적용 — 진정 구간 제외한 유효 구간만 사용함
+    trimmed1, _ = trim_dataframe(df1, resolved)
+    trimmed2, _ = trim_dataframe(df2, resolved)
+
+    meta: dict = {
+        "corr_method": resolved.corr_method,
+        "sync_column_used": None,
+        "n_pairs": 0,
+        "sync_secondary": None,
+    }
+
+    column = resolve_sync_column(trimmed1, trimmed2, resolved)
+    if column is None:
+        logger.warning("동조 대상 열 부재함. 후보 %s", resolved.sync_column_candidates)
+        return None, meta
+
+    rho, n_pairs = _correlate_pair(trimmed1, trimmed2, column, resolved)
+    meta["sync_column_used"] = column
+    meta["n_pairs"] = n_pairs
+
+    # 공간평균 기준값 병기함. 점수에는 쓰지 않되, 감마가 근전도로 오염됐을 때
+    # "정본 준수와 강건성 중 무엇이 문제였나"를 사후에 판별할 유일한 수단임
+    # (docs/research/friendship-score-validity-threats.md 2절 권고)
+    spatial = resolved.sync_band
+    if (
+        column != spatial
+        and spatial in trimmed1.columns
+        and spatial in trimmed2.columns
+    ):
+        secondary, _ = _correlate_pair(trimmed1, trimmed2, spatial, resolved)
+        meta["sync_secondary"] = secondary
+
+    return rho, meta
 
 
 def compute_session_analysis(group_id: str, subject_indices: list[int]) -> dict:
@@ -240,7 +336,7 @@ def compute_session_analysis(group_id: str, subject_indices: list[int]) -> dict:
     synchrony_score = None
     if len(dataframes) == 2:
         keys = list(dataframes.keys())
-        synchrony_score = compute_synchrony(dataframes[keys[0]], dataframes[keys[1]])
+        synchrony_score, _ = compute_synchrony(dataframes[keys[0]], dataframes[keys[1]])
 
     return {
         "group_id": group_id,
@@ -556,6 +652,7 @@ def run_full_pipeline(
     baseline_duration_sec: int = 30,
     band_cols: list[str] | None = None,
     satisfaction_scores: dict[int, float] | None = None,
+    params: ScoreParams | None = None,
 ) -> dict:
     """알고리즘 명세의 전체 파이프라인을 실행함
 
@@ -605,6 +702,8 @@ def run_full_pipeline(
             "pair_features": None,
             "y_score": None,
             "synchrony_score": None,
+            "friendship_score": None,
+            "score_params": _resolve_params(params).to_dict(),
             "pipeline_params": {
                 "stimulus_duration_sec": stimulus_duration_sec,
                 "window_size_sec": window_size_sec,
@@ -697,13 +796,21 @@ def run_full_pipeline(
         if idx_a in satisfaction_scores and idx_b in satisfaction_scores:
             y_score = compute_y(satisfaction_scores[idx_a], satisfaction_scores[idx_b])
 
-    # 기존 compute_synchrony를 활용한 synchrony_score 계산 수행함
+    # 동조율과 Friendship Score 산출함. 입력은 반드시 raw_dataframes임 —
+    # normalized 쪽은 band_cols만 남아 채널별 열(Pz_gamma)이 사라짐
+    score_params = _resolve_params(params)
     synchrony_score = None
+    sync_meta: dict = {}
     if len(raw_dataframes) == 2:
         keys = list(raw_dataframes.keys())
-        synchrony_score = compute_synchrony(
-            raw_dataframes[keys[0]], raw_dataframes[keys[1]]
+        synchrony_score, sync_meta = compute_synchrony(
+            raw_dataframes[keys[0]], raw_dataframes[keys[1]], score_params
         )
+
+    # 1단계는 FAA 회피율이 없으므로 avoidance_rate=None임 (2단계에서 연결)
+    friendship_score, score_meta = compute_friendship_score(
+        synchrony_score, None, score_params
+    )
 
     return {
         "group_id": group_id,
@@ -711,6 +818,8 @@ def run_full_pipeline(
         "pair_features": pair_features,
         "y_score": y_score,
         "synchrony_score": synchrony_score,
+        "friendship_score": friendship_score,
+        "score_params": {**score_params.to_dict(), **sync_meta, **score_meta},
         "pipeline_params": {
             "stimulus_duration_sec": stimulus_duration_sec,
             "window_size_sec": window_size_sec,

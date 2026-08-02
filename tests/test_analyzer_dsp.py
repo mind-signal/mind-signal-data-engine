@@ -149,19 +149,64 @@ def test_short_window_raises_instead_of_returning_zero(entry):
 
 
 def test_synchrony_recovers_common_alpha_modulation():
-    """[회귀 C] 공통 알파 변조를 가진 두 피실험자의 동조율이 0.90 이상이어야 함"""
+    """[회귀 C] 공통 알파 변조를 가진 두 피실험자의 동조율이 0.90 이상이어야 함
+
+    이 픽스처는 공통 변조를 알파 톤에만 걸므로 대역을 alpha로 명시 주입함.
+    정본 지표(감마)로 이 픽스처를 돌리면 감마는 잡음에서만 나와 상관이 0
+    근처다 — 아래 감마 버전이 그 대비다.
+    """
     from server.services.analysis import compute_synchrony
+    from server.services.score_params import ScoreParams
 
     n_sec = 260
     modulation = 1.0 + 0.5 * np.sin(2 * np.pi * np.arange(n_sec) / 50.0)
     frames = [_synthesize_session(seed, n_sec, modulation) for seed in (11, 22)]
-    score = compute_synchrony(frames[0], frames[1])
+    score, meta = compute_synchrony(
+        frames[0], frames[1], ScoreParams(sync_channel=None, sync_band="alpha")
+    )
     assert score is not None
     assert score >= 0.90
+    assert meta["sync_column_used"] == "alpha"
 
 
-def _synthesize_session(seed: int, n_sec: int, modulation: np.ndarray) -> pd.DataFrame:
-    """공통 알파 변조와 개별 위상 및 잡음을 가진 합성 세션 DataFrame 생성함"""
+def test_synchrony_recovers_common_gamma_modulation():
+    """정본 지표(감마)로도 공통 변조가 있으면 동조율이 회복돼야 함
+
+    광대역 잡음 진폭에 공통 변조를 걸어 감마 대역이 함께 움직이게 함.
+    스피어만 순위상관은 단조 변환에 불변이라 대역 값이 RMS인지 파워인지에
+    영향받지 않음.
+    """
+    from server.services.analysis import compute_synchrony
+    from server.services.score_params import ScoreParams
+
+    n_sec = 260
+    # 알파 버전보다 변조를 깊게 검. 감마는 잡음에서만 나오고 단일 세그먼트
+    # 피리오도그램이라 창당 추정 분산이 커(백색잡음 실측 변동계수 0.31)
+    # 같은 변조 깊이에서는 상관이 알파보다 감쇠함
+    modulation = 1.0 + 1.0 * np.sin(2 * np.pi * np.arange(n_sec) / 50.0)
+    frames = [
+        _synthesize_session(seed, n_sec, modulation, noise_modulated=True)
+        for seed in (33, 44)
+    ]
+    score, meta = compute_synchrony(
+        frames[0], frames[1], ScoreParams(sync_channel=None, sync_band="gamma")
+    )
+    assert score is not None
+    assert score >= 0.90
+    assert meta["sync_column_used"] == "gamma"
+
+
+def _synthesize_session(
+    seed: int,
+    n_sec: int,
+    modulation: np.ndarray,
+    noise_modulated: bool = False,
+) -> pd.DataFrame:
+    """공통 변조와 개별 위상 및 잡음을 가진 합성 세션 DataFrame 생성함
+
+    noise_modulated면 광대역 잡음 진폭에도 같은 변조를 걸어 감마 대역이
+    공통으로 움직이게 함.
+    """
     analyzer = MindSignalAnalyzer()
     rng = np.random.default_rng(seed)
     t = np.arange(128) / FS
@@ -169,11 +214,12 @@ def _synthesize_session(seed: int, n_sec: int, modulation: np.ndarray) -> pd.Dat
     rows = []
     for i in range(n_sec):
         amplitude = TONE_AMPLITUDE * modulation[i] * (1.0 + 0.05 * rng.normal())
+        noise_scale = 5.0 * (modulation[i] if noise_modulated else 1.0)
         window = (
             DC_LEVEL
             + 30.0 * rng.normal()
             + amplitude * np.sin(2 * np.pi * 10 * t + rng.uniform(0, 2 * np.pi))
-            + rng.normal(0, 5.0, 128)
+            + rng.normal(0, noise_scale, 128)
         )
         rows.append(
             {
