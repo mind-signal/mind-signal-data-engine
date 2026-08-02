@@ -10,6 +10,7 @@ stdout이 tty가 아니면 Python이 인코딩을 ANSI 코드페이지(Windows �
 """
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -19,10 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCANNED_DIRS = ("core", "server")
 
 
-def _print_literals(path: Path):
+def _print_literals(path: Path) -> Iterator[tuple[int, str]]:
     """파일 안 print() 호출 인자의 문자열 리터럴을 (줄번호, 값)으로 반환함.
 
-    docstring과 주석은 출력되지 않아 무해하므로 제외함 — 포함하면 오탐이 수십 건임.
+    docstring과 주석은 출력되지 않아 무해하므로 제외함. 포함하면 오탐이 수십 건임.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -34,9 +35,13 @@ def _print_literals(path: Path):
                 yield node.lineno, arg.value
 
 
-def test_print_literals_survive_cp949_stdout():
-    """print로 나가는 문자열은 전부 cp949로 인코딩 가능해야 함."""
-    offenders = []
+def test_print_literals_survive_cp949_stdout() -> None:
+    """print로 나가는 문자열은 전부 cp949로 인코딩 가능해야 함.
+
+    리터럴만 검사함. 보간되는 런타임 값(env에서 온 headset_id와 LAN_IP)은 정적으로
+    알 수 없어 호출부에서 `!a` 변환으로 ASCII를 보장함.
+    """
+    offenders: list[str] = []
     for directory in SCANNED_DIRS:
         for path in sorted((REPO_ROOT / directory).rglob("*.py")):
             for lineno, value in _print_literals(path):

@@ -452,7 +452,7 @@ class MindSignalStreamer(Cortex):
             if len(connected) == 1:
                 self.headset_id = connected[0]
                 print(
-                    f"[INFO] connected 헤드셋 '{self.headset_id}' 우선 선택함 "
+                    f"[INFO] connected 헤드셋 {self.headset_id!a} 우선 선택함 "
                     f"(subject {self.subject_index})"
                 )
             elif len(connected) > 1:
@@ -474,7 +474,7 @@ class MindSignalStreamer(Cortex):
         if len(headset_ids) == 1:
             fallback_id = headset_ids[0]
             print(
-                f"[WARN] 설정 헤드셋 ID '{self.headset_id}' 미발견. "
+                f"[WARN] 설정 헤드셋 ID {self.headset_id!a} 미발견. "
                 f"연결된 헤드셋 '{fallback_id}' 으로 폴백함 "
                 f"(subject {self.subject_index})"
             )
@@ -482,13 +482,13 @@ class MindSignalStreamer(Cortex):
             super()._handle_query_headset(result_dic)
         elif len(headset_ids) == 0:
             print(
-                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견이고 "
+                f"[ERROR] 설정 헤드셋 ID {self.headset_id!a} 미발견이고 "
                 f"연결된 헤드셋도 없어 측정 불가. 종료함 (subject {self.subject_index})"
             )
             self.close()
         else:
             print(
-                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견이고 "
+                f"[ERROR] 설정 헤드셋 ID {self.headset_id!a} 미발견이고 "
                 f"연결된 헤드셋이 {len(headset_ids)}대({headset_ids})라 "
                 f"자동 선택 불가. 종료함 (subject {self.subject_index})"
             )
