@@ -457,7 +457,7 @@ class MindSignalStreamer(Cortex):
                 )
             elif len(connected) > 1:
                 print(
-                    f"[WARN] connected 헤드셋 {len(connected)}대 ({connected}) — "
+                    f"[WARN] connected 헤드셋 {len(connected)}대 ({connected})라 "
                     f"자동 우선선택 skip, SDK 기본 선택 위임 (subject {self.subject_index})"
                 )
             super()._handle_query_headset(result_dic)
@@ -474,7 +474,7 @@ class MindSignalStreamer(Cortex):
         if len(headset_ids) == 1:
             fallback_id = headset_ids[0]
             print(
-                f"[WARN] 설정 헤드셋 ID '{self.headset_id}' 미발견 — "
+                f"[WARN] 설정 헤드셋 ID '{self.headset_id}' 미발견. "
                 f"연결된 헤드셋 '{fallback_id}' 으로 폴백함 "
                 f"(subject {self.subject_index})"
             )
@@ -482,14 +482,14 @@ class MindSignalStreamer(Cortex):
             super()._handle_query_headset(result_dic)
         elif len(headset_ids) == 0:
             print(
-                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
-                f"연결된 헤드셋 없음 — 측정 불가. 종료함 (subject {self.subject_index})"
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견이고 "
+                f"연결된 헤드셋도 없어 측정 불가. 종료함 (subject {self.subject_index})"
             )
             self.close()
         else:
             print(
-                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견 + "
-                f"연결된 헤드셋 {len(headset_ids)}대 ({headset_ids}) — "
+                f"[ERROR] 설정 헤드셋 ID '{self.headset_id}' 미발견이고 "
+                f"연결된 헤드셋이 {len(headset_ids)}대({headset_ids})라 "
                 f"자동 선택 불가. 종료함 (subject {self.subject_index})"
             )
             self.close()
@@ -574,8 +574,8 @@ class MindSignalStreamer(Cortex):
                 if tripped and not self._fail_closed_triggered:
                     self._fail_closed_triggered = True
                     print(
-                        "[FAIL_CLOSED] proxy /health fail-closed 지속"
-                        f" — 측정 중단함 (subject {self.subject_index})"
+                        "[FAIL_CLOSED] proxy /health fail-closed 지속으로"
+                        f" 측정 중단함 (subject {self.subject_index})"
                     )
                     try:
                         self.close_session()
@@ -1010,7 +1010,7 @@ class MindSignalStreamer(Cortex):
                     if not self._fail_closed_triggered:
                         self._fail_closed_triggered = True
                         print(
-                            "[FAIL_CLOSED] proxy 전송 retry 소진 — 측정 중단함"
+                            "[FAIL_CLOSED] proxy 전송 retry 소진으로 측정 중단함"
                             f" (subject {self.subject_index})"
                         )
                         try:
