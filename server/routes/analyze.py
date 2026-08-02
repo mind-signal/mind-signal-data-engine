@@ -109,6 +109,13 @@ class PipelineResponse(BaseModel):
     pair_features: dict[str, float] | None = None
     y_score: float | None = None
     synchrony_score: float | None = None
+    # 정본 수식 점수임. 동조율에 100을 곱한 값이 아니라 민맥스 정규화 가중합이며
+    # 상관 0이 50점임. score_params에 실제 사용값 원장이 실림
+    friendship_score: float | None = None
+    # 설정 원장(score_params)과 산출 메타(score_meta)를 분리함. 원장은 항상
+    # 같은 키를 내고, 메타에는 사용한 열과 유효 쌍 수와 미산출 사유가 담김
+    score_params: dict | None = None
+    score_meta: dict | None = None
     pipeline_params: dict
     markdown: str | None = None
     similarity_features: dict | None = None  # SEQUENTIAL 모드 전용 유사도 결과
@@ -169,6 +176,9 @@ async def analyze_pipeline(
             pair_features=result.get("pair_features"),
             y_score=result.get("y_score"),
             synchrony_score=result.get("synchrony_score"),
+            friendship_score=result.get("friendship_score"),
+            score_params=result.get("score_params"),
+            score_meta=result.get("score_meta"),
             pipeline_params=result.get("pipeline_params", {}),
             similarity_features={"mode": "DUAL_2PC"},  # 메타데이터
         )

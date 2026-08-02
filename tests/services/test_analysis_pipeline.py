@@ -453,6 +453,9 @@ class TestRunFullPipeline:
             "pair_features",
             "y_score",
             "synchrony_score",
+            "friendship_score",
+            "score_params",
+            "score_meta",
             "pipeline_params",
             "dataframes",
         }
@@ -679,6 +682,11 @@ class TestRunFullPipeline:
         assert failed["error_code"] == "TIMESTAMP_COLUMN_MISSING"
         assert healthy_subject["n_features"] == 1
         assert result["pair_features"] is None
+        # 분석에서 빠진 subject의 원본으로 점수를 내면 pair_features는 None인데
+        # 점수만 나오는 상태가 됨. 판정 기준을 pair_features와 통일함
+        assert result["friendship_score"] is None
+        assert result["score_meta"]["sync_reason"] == "insufficient_subjects"
+        assert result["score_meta"]["reason"] == "synchrony_missing"
 
     def test_baseline_mean_uses_complete_observations_only(self):
         """coverage 판정에서 제외한 불완전 관측 초는 평균에도 포함하지 않음"""

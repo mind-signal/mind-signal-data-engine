@@ -1,8 +1,18 @@
 import os
+from pathlib import Path
 from typing import Literal
 
 import certifi
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# .env.local을 os.environ에 실제로 싣는 유일한 지점임. Settings의 env_file은
+# 이 클래스만 채우고 os.environ에는 넣지 않으므로, os.getenv로 읽는 쪽
+# (ScoreParams.from_env 등)은 이것이 없으면 값을 못 봄.
+# **config에서 하는 이유**: app.py에서 부르면 그보다 먼저 import되는 모듈이
+# 이미 os.getenv를 끝낸 뒤라 설정이 조용히 무시됨(실측: FS_ 파라미터 전부).
+# 절대경로인 이유는 cwd에 의존하지 않기 위함임
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
 
 # SSL_CERT_FILE이 존재하지 않는 경로를 가리키면 certifi 번들로 교정함.
 # conda base 활성화가 심는 stale 값(miniconda3/ssl/cacert.pem 부재)으로 httpx가

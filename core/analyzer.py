@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.signal import welch
+from scipy.stats import spearmanr
 
 
 class MindSignalAnalyzer:
@@ -48,10 +49,46 @@ class MindSignalAnalyzer:
         return faa_score
 
     @staticmethod
-    def calculate_synchrony(user1_eeg, user2_eeg):
-        """두 사용자 간의 뇌파 동기화(Correlation) 계산"""
-        correlation = np.corrcoef(user1_eeg, user2_eeg)[0, 1]
-        return correlation
+    def calculate_synchrony(
+        user1_eeg: np.ndarray,
+        user2_eeg: np.ndarray,
+        method: str = "pearson",
+    ) -> float:
+        """두 사용자 간의 뇌파 동조율 계산함.
+
+        **상관 계산은 이 메서드 한 곳으로만 들어감.** 호출부가 scipy를 직접
+        부르면 여기를 mock한 기존 테스트가 조용히 무력화됨.
+
+        Args:
+            user1_eeg: 첫 피실험자 시계열임
+            user2_eeg: 둘째 피실험자 시계열임
+            method: "pearson" 또는 "spearman"임. 정본 수식은 스피어만 순위상관
+
+        Returns:
+            상관계수 반환. 한쪽이 상수면 nan이 나올 수 있으므로 호출부가
+            유한성을 확인해야 함
+
+        Raises:
+            ValueError: 미지원 method임
+        """
+        if method not in ("pearson", "spearman"):
+            raise ValueError(f"미지원 상관 방식 {method!r}")
+
+        # 결측 제거를 두 경로에서 통일함. corrcoef는 NaN이 하나만 있어도
+        # 전체가 nan이고 spearmanr(nan_policy="omit")은 쌍만 빼므로, 마스크를
+        # 미리 걸지 않으면 같은 입력에서 방식마다 결과 의미가 달라짐
+        left = np.asarray(user1_eeg, dtype=float)
+        right = np.asarray(user2_eeg, dtype=float)
+        mask = np.isfinite(left) & np.isfinite(right)
+        left, right = left[mask], right[mask]
+        if left.size < 2:
+            return float("nan")
+
+        if method == "pearson":
+            return float(np.corrcoef(left, right)[0, 1])
+        # 순위상관은 단조 변환에 불변이라 대역 값이 파워인지 RMS인지에
+        # 영향받지 않음. scipy 1.15에서 결과 객체의 statistic을 씀
+        return float(spearmanr(left, right).statistic)
 
     def __init__(self, sampling_rate: int = 128) -> None:
         # Emotiv Insight의 샘플링 레이트는 초당 128Hz임

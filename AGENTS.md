@@ -226,7 +226,8 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 - **제거된 API** — `filter_delta`부터 `filter_gamma`까지 5개 메서드와 `_butter_bandpass`와 `get_rms_power`는 제거됐다(Welch 경로에 "필터링된 시계열"이라는 중간 산출물이 없어 전부 호출자 0건이었음). 대체는 `get_band_power(values, band)`다.
 - **짧은 창 금지** — 128샘플 미만은 빈 간격이 넓어져 대역에 빈이 안 잡히고 예외 없이 0.0이나 무의미한 값이 나온다(길이 16에서 theta와 alpha가 나란히 11.86). `_band_powers_from` 진입부에서 `ValueError`로 막으므로 `get_all_powers`와 `get_band_power` 모두 보호된다. 라이브 경로는 `streamer`가 비오버랩으로 버퍼를 비워 항상 128이다.
 - **DC 제거자는 하나다** — `_remove_dc`가 유일하며 `welch`는 `detrend=False`로 부른다. 둘을 겹쳐 두면 어느 쪽을 없애도 결과가 같아져 회귀 테스트가 무력해진다. 상수 DC 입력 테스트가 이 계약을 지킨다.
-- **Synchrony** — 두 피실험자 간 뇌파 상관계수 (Pearson correlation)
+- **Synchrony** — 두 피실험자 간 뇌파 상관계수. **2026-08-03(ANALYSIS-W004)부터 스피어만 순위상관이고 대상은 측두-두정엽(T7, T8, Pz) 감마 채널 평균이다.** 피어슨과 alpha 공간평균은 그 이전 구현이며 `FS_CORR_METHOD=pearson`으로만 재현된다. 방식과 대상은 `server/services/score_params.py`의 `ScoreParams`가 정본이고 실제 사용값은 분석 결과의 `score_params`에 실린다
+- **Friendship Score** — 정본 수식 점수(0..100). 동조율에 100을 곱한 값이 **아니라** 민맥스 정규화 가중합이라 상관 0이 50점이다. FAA 회피 항은 2단계 미연결 상태다
 - **EmotivMetrics (MET)** — Emotiv 자체 산출 지표 6종 (focus, engagement, interest, excitement, stress, relaxation)
 - **Cortex API** — Emotiv 헤드셋과 WebSocket(wss://localhost:6868) JSON-RPC 인터페이스
 
