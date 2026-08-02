@@ -19,7 +19,13 @@ CSV_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "csv"
 # 구간 상수의 정본은 ScoreParams임. 아래 세 이름은 하위 호환 별칭이며
 # **import 시점 스냅샷**이라 이후의 환경변수 변경을 반영하지 않음.
 # 런타임 값이 필요하면 ScoreParams.from_env()를 호출할 것
-_DEFAULT_PARAMS = ScoreParams.from_env()
+try:
+    _DEFAULT_PARAMS = ScoreParams.from_env()
+except ValueError as exc:
+    # 잘못된 FS_ 값 하나로 서버가 통째로 못 뜨면 런처의 /health 게이트에서
+    # 원인 불명 기동 실패로 보임. 기본값으로 낮추고 무엇이 거부됐는지 남김
+    logger.error("점수 파라미터 환경변수가 유효하지 않아 기본값 사용함: %s", exc)
+    _DEFAULT_PARAMS = ScoreParams()
 
 # 측정 진정 구간 — 분석 제외, 표시만 함
 TRIM_START_SECONDS = _DEFAULT_PARAMS.trim_start_sec
@@ -103,7 +109,7 @@ def compute_baseline_from_warmup(
     baseline_df: pd.DataFrame,
     band_cols: list[str],
 ) -> dict[str, float]:
-    """시작 15초 진정 구간에서 기저 뇌파 평균을 추출함"""
+    """시작 trim 구간에서 기저 뇌파 평균을 추출함 (기본 30초)"""
     result = {}
     for band in band_cols:
         if band in baseline_df.columns:
@@ -217,6 +223,9 @@ _EMPTY_SCORE_META: dict = {
     "sync_secondary": None,
     "terms": [],
     "w_effective": None,
+    # 동조율이 왜 없는가(sync_reason)와 점수가 왜 없는가(reason)는 다른 질문임.
+    # 한 키로 합치면 뒤에 병합되는 쪽이 앞을 덮어써 원인이 사라짐
+    "sync_reason": None,
     "reason": None,
 }
 
@@ -248,7 +257,11 @@ def _sync_series(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     채널 평균은 정본이 지정한 영역 전체를 하나의 시계열로 다루기 위함이며,
     단일 채널보다 창당 추정 잡음이 상쇄됨.
     """
-    series = df[columns].mean(axis=1)
+    # 한 채널이라도 결측이면 그 행을 NaN으로 둠(DataFrame.mean에는 min_count가
+    # 없어 마스크로 처리함). skipna 기본값 그대로면 행마다 평균 대상 채널이
+    # 달라져 상류의 결측 마스크 통일이 무의미해짐
+    values = df[columns]
+    series = values.mean(axis=1).where(values.notna().all(axis=1))
     frame = pd.DataFrame({SYNC_SERIES_COLUMN: series.values})
     if "timestamp" in df.columns:
         frame.insert(0, "timestamp", df["timestamp"].values)
@@ -741,7 +754,7 @@ def run_full_pipeline(
             "synchrony_score": None,
             "friendship_score": None,
             "score_params": _resolve_params(params).to_dict(),
-            "score_meta": {**_EMPTY_SCORE_META, "reason": "no_usable_csv"},
+            "score_meta": {**_EMPTY_SCORE_META, "sync_reason": "no_usable_csv"},
             "pipeline_params": {
                 "stimulus_duration_sec": stimulus_duration_sec,
                 "window_size_sec": window_size_sec,
@@ -841,7 +854,7 @@ def run_full_pipeline(
     # 나오는 상태가 됨(판정 기준을 pair_features와 통일함)
     score_params = _resolve_params(params)
     synchrony_score = None
-    sync_meta: dict = {"reason": "insufficient_subjects"}
+    sync_meta: dict = {"sync_reason": "insufficient_subjects"}
     usable = [idx for idx in subject_indices if idx in subject_features]
     if len(usable) == 2:
         synchrony_score, sync_meta = compute_synchrony(

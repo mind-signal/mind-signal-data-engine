@@ -4,7 +4,6 @@ import socket
 from contextlib import asynccontextmanager
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -22,7 +21,7 @@ from server.services.webhook import (
     unregister_to_backend_pending,
 )
 
-load_dotenv(".env.local")
+# .env.local 로드는 server.config가 import 시점에 처리함(순서 의존 제거)
 
 # Preflight soft-check: ENGINE_SECRET_KEY가 placeholder면 WARNING 로그만 출력함
 # (Phase 17.5.1 — abort 제거). 실기기 테스트 등 placeholder 그대로 쓰다가 실험 후

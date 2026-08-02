@@ -16,12 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from server.services.analysis import (
-    TRIM_END_SECONDS,
-    TRIM_START_SECONDS,
-    align_on_second,
-    compute_synchrony,
-)
+from server.services.analysis import align_on_second, compute_synchrony
 from server.services.score_params import ScoreParams
 
 # 이 픽스처는 alpha 열만 만들므로 정본 대상(Pz 감마) 대신 공간평균 alpha를
@@ -66,7 +61,7 @@ def test_positional_alignment_would_report_spurious_correlation():
     a = _make_df("2026-07-10 15:00:00", 130, wave)
     b = _make_df("2026-07-10 15:00:30", 100, wave[30:])
 
-    trim = TRIM_START_SECONDS + TRIM_END_SECONDS
+    trim = ALPHA_PARAMS.trim_start_sec + ALPHA_PARAMS.trim_end_sec
     assert len(b) - trim >= 10  # 픽스처가 유효 구간을 남기는지 확인함
 
     # 수정 후: 절대시각 정렬이라 완전 상관
@@ -75,8 +70,9 @@ def test_positional_alignment_would_report_spurious_correlation():
     assert meta["sync_columns_used"] == ["alpha"]
 
     # 구 동작(위치 정렬)을 직접 재현하면 1.0이 아님
-    t1 = a.iloc[TRIM_START_SECONDS : len(a) - TRIM_END_SECONDS].reset_index(drop=True)
-    t2 = b.iloc[TRIM_START_SECONDS : len(b) - TRIM_END_SECONDS].reset_index(drop=True)
+    start, end = ALPHA_PARAMS.trim_start_sec, ALPHA_PARAMS.trim_end_sec
+    t1 = a.iloc[start : len(a) - end].reset_index(drop=True)
+    t2 = b.iloc[start : len(b) - end].reset_index(drop=True)
     n = min(len(t1), len(t2))
     positional = np.corrcoef(t1["alpha"].values[:n], t2["alpha"].values[:n])[0, 1]
     assert abs(positional - 1.0) > 0.1
