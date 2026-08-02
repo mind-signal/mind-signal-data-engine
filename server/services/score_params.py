@@ -37,8 +37,8 @@ class ScoreParams:
         corr_method: 상관 방식임. 정본은 스피어만 순위상관
         sync_channel: 동조 대상 채널임. None이면 채널 공간평균 열 사용
         sync_band: 동조 대상 대역임. 정본은 감마
-        trim_start_sec: 측정 앞쪽 진정 구간 초임
-        trim_end_sec: 측정 뒤쪽 진정 구간 초임
+        trim_start_sec: 측정 앞쪽 제외 구간 초임. 정본은 baseline과 같은 30초
+        trim_end_sec: 측정 뒤쪽 제외 구간 초임. 정본은 제외하지 않음(0)
         min_analysis_sec: trim 이후 유효 구간의 최소 초임
     """
 
@@ -47,8 +47,11 @@ class ScoreParams:
     corr_method: str = "spearman"
     sync_channel: str | None = "Pz"
     sync_band: str = "gamma"
-    trim_start_sec: int = 15
-    trim_end_sec: int = 15
+    # 정본은 "초반 30초 제외"임. 기존 앞뒤 15초는 계약 위반이었고, 그 값으로는
+    # 동조율이 보는 구간과 feature baseline 구간(compute_baseline의
+    # baseline_duration_sec=30)이 어긋나 같은 세션을 두 기준으로 잘랐음
+    trim_start_sec: int = 30
+    trim_end_sec: int = 0
     min_analysis_sec: int = 180
 
     def __post_init__(self) -> None:

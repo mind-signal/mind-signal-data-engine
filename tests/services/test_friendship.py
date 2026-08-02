@@ -74,10 +74,16 @@ class TestFriendshipScore:
 class TestScoreParams:
     """파라미터 검증과 파생값 계약 검증함"""
 
+    def test_canonical_trim_is_leading_thirty_seconds(self):
+        """정본은 초반 30초만 제외함. 뒤는 자르지 않음"""
+        params = ScoreParams()
+        assert params.trim_start_sec == 30
+        assert params.trim_end_sec == 0
+
     def test_required_total_derives_from_trim(self):
         """필요 측정 시간은 상수가 아니라 trim에서 파생됨"""
         assert ScoreParams().required_total_sec == 210
-        assert ScoreParams(trim_start_sec=30).required_total_sec == 225
+        assert ScoreParams(trim_start_sec=45).required_total_sec == 225
 
     def test_negative_weight_rejected(self):
         with pytest.raises(ValueError):
@@ -118,7 +124,7 @@ class TestSessionTier:
 
     def test_tier_follows_trim_params(self):
         """trim을 늘리면 같은 측정이 등급을 잃음"""
-        params = ScoreParams(trim_start_sec=30, trim_end_sec=30)
+        params = ScoreParams(trim_start_sec=45, trim_end_sec=15)
         assert classify_session_tier(210, params) == "PARTIAL"
 
 
