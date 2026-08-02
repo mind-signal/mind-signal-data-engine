@@ -209,22 +209,41 @@ def align_on_second(
 MIN_SYNCHRONY_PAIRS = 10
 
 
-def resolve_sync_column(
-    df1: pd.DataFrame, df2: pd.DataFrame, params: ScoreParams
-) -> str | None:
-    """양쪽 DataFrame에 모두 있는 동조 대상 열을 우선순위대로 고름.
+SYNC_SERIES_COLUMN = "_sync_series"
 
-    정본은 Pz 감마지만 채널별 열은 현행 37열 CSV에만 있음. 구형 CSV에서는
-    공간평균 열로 폴백하되 **무엇을 썼는지 호출부가 결과에 남겨야 함** —
-    조용한 폴백은 나중에 "왜 점수가 다르지"를 만듦.
+
+def resolve_sync_columns(
+    df1: pd.DataFrame, df2: pd.DataFrame, params: ScoreParams
+) -> list[str]:
+    """양쪽 DataFrame에 모두 있는 동조 대상 열을 고름.
+
+    정본은 측두-두정엽 셋(T7, T8, Pz)의 감마임. 채널별 열은 현행 37열 CSV에만
+    있으므로 구형 CSV에서는 공간평균 열로 폴백하되 **무엇을 썼는지 호출부가
+    결과에 남겨야 함** — 조용한 폴백은 나중에 "왜 점수가 다르지"를 만듦.
 
     Returns:
-        선택된 열 이름 반환. 후보가 하나도 없으면 None 반환
+        선택된 열 이름 목록 반환. 쓸 열이 없으면 빈 목록 반환
     """
-    for candidate in params.sync_column_candidates:
-        if candidate in df1.columns and candidate in df2.columns:
-            return candidate
-    return None
+    shared = set(df1.columns) & set(df2.columns)
+    channel_cols = [c for c in params.channel_columns if c in shared]
+    if channel_cols:
+        return channel_cols
+    if params.spatial_column in shared:
+        return [params.spatial_column]
+    return []
+
+
+def _sync_series(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """대상 열들의 채널 평균을 단일 시계열 열로 만든 DataFrame 반환함.
+
+    채널 평균은 정본이 지정한 영역 전체를 하나의 시계열로 다루기 위함이며,
+    단일 채널보다 창당 추정 잡음이 상쇄됨.
+    """
+    series = df[columns].mean(axis=1)
+    frame = pd.DataFrame({SYNC_SERIES_COLUMN: series.values})
+    if "timestamp" in df.columns:
+        frame.insert(0, "timestamp", df["timestamp"].values)
+    return frame
 
 
 def _correlate_pair(
@@ -276,7 +295,7 @@ def compute_synchrony(
     band_cols만 남아 채널별 열이 사라짐.
 
     Returns:
-        (동조율 또는 None, 메타 dict) 튜플 반환. 메타에는 사용한 열과 유효 쌍
+        (동조율 또는 None, 메타 dict) 튜플 반환. 메타에는 사용한 열들과 유효 쌍
         수, 상관 방식, 그리고 공간평균 기준 병기값(sync_secondary)이 담김
     """
     resolved = _resolve_params(params)
@@ -287,26 +306,35 @@ def compute_synchrony(
 
     meta: dict = {
         "corr_method": resolved.corr_method,
-        "sync_column_used": None,
+        "sync_columns_used": [],
         "n_pairs": 0,
         "sync_secondary": None,
     }
 
-    column = resolve_sync_column(trimmed1, trimmed2, resolved)
-    if column is None:
-        logger.warning("동조 대상 열 부재함. 후보 %s", resolved.sync_column_candidates)
+    columns = resolve_sync_columns(trimmed1, trimmed2, resolved)
+    if not columns:
+        logger.warning(
+            "동조 대상 열 부재함. 후보 %s 또는 %s",
+            resolved.channel_columns,
+            resolved.spatial_column,
+        )
         return None, meta
 
-    rho, n_pairs = _correlate_pair(trimmed1, trimmed2, column, resolved)
-    meta["sync_column_used"] = column
+    rho, n_pairs = _correlate_pair(
+        _sync_series(trimmed1, columns),
+        _sync_series(trimmed2, columns),
+        SYNC_SERIES_COLUMN,
+        resolved,
+    )
+    meta["sync_columns_used"] = columns
     meta["n_pairs"] = n_pairs
 
     # 공간평균 기준값 병기함. 점수에는 쓰지 않되, 감마가 근전도로 오염됐을 때
     # "정본 준수와 강건성 중 무엇이 문제였나"를 사후에 판별할 유일한 수단임
     # (docs/research/friendship-score-validity-threats.md 2절 권고)
-    spatial = resolved.sync_band
+    spatial = resolved.spatial_column
     if (
-        column != spatial
+        columns != [spatial]
         and spatial in trimmed1.columns
         and spatial in trimmed2.columns
     ):

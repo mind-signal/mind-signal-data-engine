@@ -162,11 +162,11 @@ def test_synchrony_recovers_common_alpha_modulation():
     modulation = 1.0 + 0.5 * np.sin(2 * np.pi * np.arange(n_sec) / 50.0)
     frames = [_synthesize_session(seed, n_sec, modulation) for seed in (11, 22)]
     score, meta = compute_synchrony(
-        frames[0], frames[1], ScoreParams(sync_channel=None, sync_band="alpha")
+        frames[0], frames[1], ScoreParams(sync_channels=(), sync_band="alpha")
     )
     assert score is not None
     assert score >= 0.90
-    assert meta["sync_column_used"] == "alpha"
+    assert meta["sync_columns_used"] == ["alpha"]
 
 
 def test_synchrony_recovers_common_gamma_modulation():
@@ -189,11 +189,11 @@ def test_synchrony_recovers_common_gamma_modulation():
         for seed in (33, 44)
     ]
     score, meta = compute_synchrony(
-        frames[0], frames[1], ScoreParams(sync_channel=None, sync_band="gamma")
+        frames[0], frames[1], ScoreParams(sync_channels=(), sync_band="gamma")
     )
     assert score is not None
     assert score >= 0.90
-    assert meta["sync_column_used"] == "gamma"
+    assert meta["sync_columns_used"] == ["gamma"]
 
 
 def _synthesize_session(

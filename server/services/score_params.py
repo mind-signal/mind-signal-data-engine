@@ -35,7 +35,8 @@ class ScoreParams:
         w_sync: 동조 항 가중치임. 정본 1.0
         w_faa: FAA 회피 항 가중치임. 1단계는 0, 2단계에서 0.25
         corr_method: 상관 방식임. 정본은 스피어만 순위상관
-        sync_channel: 동조 대상 채널임. None이면 채널 공간평균 열 사용
+        sync_channels: 동조 대상 채널 묶음임. 둘 이상이면 채널 평균을 씀.
+            비어 있으면 CSV의 공간평균 열을 그대로 사용
         sync_band: 동조 대상 대역임. 정본은 감마
         trim_start_sec: 측정 앞쪽 제외 구간 초임. 정본은 baseline과 같은 30초
         trim_end_sec: 측정 뒤쪽 제외 구간 초임. 정본은 제외하지 않음(0)
@@ -45,7 +46,10 @@ class ScoreParams:
     w_sync: float = 1.0
     w_faa: float = 0.0
     corr_method: str = "spearman"
-    sync_channel: str | None = "Pz"
+    # 정본은 측두-두정엽 셋임. 제안서 원문이 "두 참여자의 측두, 두정엽 감마파의
+    # 시계열 데이터 간의 스피어만 순위 상관계수"이고 지표 표도 (T7, T8, Pz)임.
+    # Pz 단독은 HANDOFF 요약 표기였고 원문과 어긋남
+    sync_channels: tuple[str, ...] = ("T7", "T8", "Pz")
     sync_band: str = "gamma"
     # 정본은 "초반 30초 제외"임. 기존 앞뒤 15초는 계약 위반이었고, 그 값으로는
     # 동조율이 보는 구간과 feature baseline 구간(compute_baseline의
@@ -83,33 +87,46 @@ class ScoreParams:
         return self.min_analysis_sec + self.trim_start_sec + self.trim_end_sec
 
     @property
-    def sync_column_candidates(self) -> list[str]:
-        """동조 대상 열 후보를 우선순위 순으로 반환함.
+    def channel_columns(self) -> list[str]:
+        """채널별 대상 열 이름을 반환함. 채널 미지정이면 빈 목록임"""
+        return [f"{ch}_{self.sync_band}" for ch in self.sync_channels]
 
-        채널별 열이 없는 구형 CSV를 위해 공간평균 열로 폴백함.
-        """
-        if self.sync_channel:
-            return [f"{self.sync_channel}_{self.sync_band}", self.sync_band]
-        return [self.sync_band]
+    @property
+    def spatial_column(self) -> str:
+        """채널별 열이 없는 구형 CSV용 공간평균 열 이름을 반환함"""
+        return self.sync_band
 
     @classmethod
     def from_env(cls) -> "ScoreParams":
         """환경변수에서 파라미터를 읽음.
 
         모듈 import 시점이 아니라 호출 시점에 읽으므로 프로세스 재기동 없이도
-        테스트에서 monkeypatch로 바꿀 수 있음. MIN_ANALYSIS_SECONDS만 FS_
-        접두사가 없는데, 백엔드와 프론트도 같은 이름을 쓰는 의도적 예외임.
+        테스트에서 monkeypatch로 바꿀 수 있음. 기본값은 전부 이 클래스의 필드
+        기본값을 그대로 씀 — 두 자리에 숫자를 적으면 반드시 갈라짐.
+        MIN_ANALYSIS_SECONDS만 FS_ 접두사가 없는데, 백엔드와 프론트도 같은
+        이름을 쓰는 의도적 예외임.
         """
-        channel = os.getenv("FS_SYNC_CHANNEL", "Pz").strip()
+        base = cls()
+        raw_channels = os.getenv("FS_SYNC_CHANNELS", "").strip()
+        channels = (
+            tuple(c.strip() for c in raw_channels.split(",") if c.strip())
+            if raw_channels
+            else base.sync_channels
+        )
+        # 명시적으로 빈 값을 주면 공간평균 열을 쓰겠다는 뜻임
+        if raw_channels in ("none", "-"):
+            channels = ()
         return cls(
-            w_sync=_env_float("FS_W_SYNC", 1.0),
-            w_faa=_env_float("FS_W_FAA", 0.0),
-            corr_method=os.getenv("FS_CORR_METHOD", "spearman").strip() or "spearman",
-            sync_channel=channel or None,
-            sync_band=os.getenv("FS_SYNC_BAND", "gamma").strip() or "gamma",
-            trim_start_sec=_env_int("FS_TRIM_START_SEC", 15),
-            trim_end_sec=_env_int("FS_TRIM_END_SEC", 15),
-            min_analysis_sec=_env_int("MIN_ANALYSIS_SECONDS", 180),
+            w_sync=_env_float("FS_W_SYNC", base.w_sync),
+            w_faa=_env_float("FS_W_FAA", base.w_faa),
+            corr_method=os.getenv("FS_CORR_METHOD", base.corr_method).strip()
+            or base.corr_method,
+            sync_channels=channels,
+            sync_band=os.getenv("FS_SYNC_BAND", base.sync_band).strip()
+            or base.sync_band,
+            trim_start_sec=_env_int("FS_TRIM_START_SEC", base.trim_start_sec),
+            trim_end_sec=_env_int("FS_TRIM_END_SEC", base.trim_end_sec),
+            min_analysis_sec=_env_int("MIN_ANALYSIS_SECONDS", base.min_analysis_sec),
         )
 
     def to_dict(self) -> dict:
@@ -119,7 +136,7 @@ class ScoreParams:
             "w_sync": self.w_sync,
             "w_faa": self.w_faa,
             "corr_method": self.corr_method,
-            "sync_channel": self.sync_channel,
+            "sync_channels": list(self.sync_channels),
             "sync_band": self.sync_band,
             "trim_start_sec": self.trim_start_sec,
             "trim_end_sec": self.trim_end_sec,

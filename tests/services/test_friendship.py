@@ -12,7 +12,7 @@ from server.services.analysis import classify_session_tier, compute_synchrony
 from server.services.friendship import compute_friendship_score
 from server.services.score_params import ScoreParams
 
-ALPHA_PARAMS = ScoreParams(sync_channel=None, sync_band="alpha")
+ALPHA_PARAMS = ScoreParams(sync_channels=(), sync_band="alpha")
 
 
 def _session(start: str, n: int, values: dict[str, np.ndarray]) -> pd.DataFrame:
@@ -105,10 +105,38 @@ class TestScoreParams:
         assert params.sync_band == "beta"
         assert params.w_faa == 0.25
 
-    def test_blank_channel_env_means_spatial_mean(self, monkeypatch):
-        """FS_SYNC_CHANNEL이 빈 값이면 공간평균 열을 대상으로 삼음"""
-        monkeypatch.setenv("FS_SYNC_CHANNEL", "")
-        assert ScoreParams.from_env().sync_column_candidates == ["gamma"]
+    def test_canonical_channels_are_temporo_parietal(self):
+        """정본 대상은 측두-두정엽 셋임 (제안서 원문 T7, T8, Pz)"""
+        params = ScoreParams()
+        assert params.sync_channels == ("T7", "T8", "Pz")
+        assert params.channel_columns == ["T7_gamma", "T8_gamma", "Pz_gamma"]
+
+    def test_channels_env_is_comma_separated(self, monkeypatch):
+        """FS_SYNC_CHANNELS로 채널 조합을 바꿀 수 있음"""
+        monkeypatch.setenv("FS_SYNC_CHANNELS", "Pz")
+        assert ScoreParams.from_env().sync_channels == ("Pz",)
+
+    def test_channels_env_none_means_spatial_mean(self, monkeypatch):
+        """none을 주면 채널별 열 대신 공간평균 열을 대상으로 삼음"""
+        monkeypatch.setenv("FS_SYNC_CHANNELS", "none")
+        params = ScoreParams.from_env()
+        assert params.channel_columns == []
+        assert params.spatial_column == "gamma"
+
+    def test_from_env_defaults_match_field_defaults(self, monkeypatch):
+        """환경변수 미설정이면 필드 기본값과 완전히 같아야 함"""
+        for name in (
+            "FS_W_SYNC",
+            "FS_W_FAA",
+            "FS_CORR_METHOD",
+            "FS_SYNC_CHANNELS",
+            "FS_SYNC_BAND",
+            "FS_TRIM_START_SEC",
+            "FS_TRIM_END_SEC",
+            "MIN_ANALYSIS_SECONDS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        assert ScoreParams.from_env() == ScoreParams()
 
 
 class TestSessionTier:
@@ -131,40 +159,81 @@ class TestSessionTier:
 class TestSynchronyColumnSelection:
     """대상 열 해석과 폴백 계약 검증함"""
 
-    def test_prefers_channel_column(self):
-        """현행 CSV에서는 Pz 감마를 씀"""
+    def test_prefers_temporo_parietal_channels(self):
+        """현행 CSV에서는 T7, T8, Pz 감마 평균을 씀"""
         rng = np.random.default_rng(0)
-        wave = rng.normal(size=60)
-        cols = {"gamma": wave, "Pz_gamma": wave}
-        a = _session("2026-08-01 10:00:00", 60, cols)
-        b = _session("2026-08-01 10:00:00", 60, cols)
+        n = 90
+        cols = {
+            "gamma": rng.normal(size=n),
+            "T7_gamma": rng.normal(size=n),
+            "T8_gamma": rng.normal(size=n),
+            "Pz_gamma": rng.normal(size=n),
+        }
+        a = _session("2026-08-01 10:00:00", n, cols)
+        b = _session("2026-08-01 10:00:00", n, cols)
         rho, meta = compute_synchrony(a, b)
-        assert meta["sync_column_used"] == "Pz_gamma"
+        assert meta["sync_columns_used"] == ["T7_gamma", "T8_gamma", "Pz_gamma"]
         assert rho == pytest.approx(1.0)
         # 공간평균 병기값도 함께 계산됨 (감마 오염 사후 판별용)
         assert meta["sync_secondary"] == pytest.approx(1.0)
 
+    def test_uses_available_channels_only(self):
+        """일부 채널 열만 있으면 있는 것끼리 평균함"""
+        rng = np.random.default_rng(5)
+        n = 90
+        cols = {"gamma": rng.normal(size=n), "Pz_gamma": rng.normal(size=n)}
+        a = _session("2026-08-01 10:00:00", n, cols)
+        b = _session("2026-08-01 10:00:00", n, cols)
+        _, meta = compute_synchrony(a, b)
+        assert meta["sync_columns_used"] == ["Pz_gamma"]
+
+    def test_channel_mean_differs_from_single_channel(self):
+        """채널 평균은 단일 채널과 다른 값을 냄 (평균이 실제로 적용됨)"""
+        rng = np.random.default_rng(7)
+        n = 90
+        a = _session(
+            "2026-08-01 10:00:00",
+            n,
+            {
+                "T7_gamma": rng.normal(size=n),
+                "T8_gamma": rng.normal(size=n),
+                "Pz_gamma": rng.normal(size=n),
+            },
+        )
+        b = _session(
+            "2026-08-01 10:00:00",
+            n,
+            {
+                "T7_gamma": rng.normal(size=n),
+                "T8_gamma": rng.normal(size=n),
+                "Pz_gamma": rng.normal(size=n),
+            },
+        )
+        mean_rho, _ = compute_synchrony(a, b)
+        pz_rho, _ = compute_synchrony(a, b, ScoreParams(sync_channels=("Pz",)))
+        assert mean_rho != pytest.approx(pz_rho)
+
     def test_falls_back_to_spatial_mean(self):
         """구형 CSV는 채널별 열이 없어 공간평균으로 폴백함"""
         rng = np.random.default_rng(1)
-        wave = rng.normal(size=60)
-        a = _session("2026-08-01 10:00:00", 60, {"gamma": wave})
-        b = _session("2026-08-01 10:00:00", 60, {"gamma": wave})
+        wave = rng.normal(size=90)
+        a = _session("2026-08-01 10:00:00", 90, {"gamma": wave})
+        b = _session("2026-08-01 10:00:00", 90, {"gamma": wave})
         _, meta = compute_synchrony(a, b)
-        assert meta["sync_column_used"] == "gamma"
+        assert meta["sync_columns_used"] == ["gamma"]
 
     def test_missing_column_returns_none(self):
         """후보 열이 하나도 없으면 미측정임"""
-        wave = np.arange(60, dtype=float)
-        a = _session("2026-08-01 10:00:00", 60, {"alpha": wave})
-        b = _session("2026-08-01 10:00:00", 60, {"alpha": wave})
+        wave = np.arange(90, dtype=float)
+        a = _session("2026-08-01 10:00:00", 90, {"alpha": wave})
+        b = _session("2026-08-01 10:00:00", 90, {"alpha": wave})
         rho, meta = compute_synchrony(a, b)
         assert rho is None
-        assert meta["sync_column_used"] is None
+        assert meta["sync_columns_used"] == []
 
     def test_constant_series_returns_none(self):
         """한쪽이 상수면 순위상관이 nan이므로 미측정으로 낮춤"""
-        n = 60
+        n = 90
         a = _session("2026-08-01 10:00:00", n, {"alpha": np.arange(n, dtype=float)})
         b = _session("2026-08-01 10:00:00", n, {"alpha": np.ones(n)})
         rho, _ = compute_synchrony(a, b, ALPHA_PARAMS)
@@ -172,7 +241,7 @@ class TestSynchronyColumnSelection:
 
     def test_spearman_beats_pearson_on_monotonic_nonlinear(self):
         """단조 비선형 관계에서 순위상관은 1.0이고 피어슨은 그보다 낮음"""
-        n = 60
+        n = 90
         x = np.linspace(1.0, 5.0, n)
         pairs = {"alpha": x}
         a = _session("2026-08-01 10:00:00", n, pairs)
@@ -182,7 +251,7 @@ class TestSynchronyColumnSelection:
         pearson, _ = compute_synchrony(
             a,
             b,
-            ScoreParams(sync_channel=None, sync_band="alpha", corr_method="pearson"),
+            ScoreParams(sync_channels=(), sync_band="alpha", corr_method="pearson"),
         )
         assert spearman == pytest.approx(1.0)
         assert pearson < spearman

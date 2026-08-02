@@ -26,7 +26,7 @@ from server.services.score_params import ScoreParams
 
 # 이 픽스처는 alpha 열만 만들므로 정본 대상(Pz 감마) 대신 공간평균 alpha를
 # 명시 주입함. 검증 대상이 지표 선택이 아니라 시간축 정렬 로직이기 때문임
-ALPHA_PARAMS = ScoreParams(sync_channel=None, sync_band="alpha")
+ALPHA_PARAMS = ScoreParams(sync_channels=(), sync_band="alpha")
 
 
 def _make_df(start: str, n: int, alpha: np.ndarray) -> pd.DataFrame:
@@ -72,7 +72,7 @@ def test_positional_alignment_would_report_spurious_correlation():
     # 수정 후: 절대시각 정렬이라 완전 상관
     rho, meta = compute_synchrony(a, b, ALPHA_PARAMS)
     assert rho == pytest.approx(1.0, abs=1e-9)
-    assert meta["sync_column_used"] == "alpha"
+    assert meta["sync_columns_used"] == ["alpha"]
 
     # 구 동작(위치 정렬)을 직접 재현하면 1.0이 아님
     t1 = a.iloc[TRIM_START_SECONDS : len(a) - TRIM_END_SECONDS].reset_index(drop=True)
