@@ -83,7 +83,7 @@ def _resolve_advertise_ip(explicit: str | None) -> str:
         except ValueError:
             pass
         print(
-            f"[WARN] LAN_IP={explicit} 이(가) Tailscale 대역(100.64.0.0/10) 밖 — "
+            f"[WARN] LAN_IP={explicit!a} 이(가) Tailscale 대역(100.64.0.0/10) 밖이라 "
             "무시하고 자동탐지로 대체함 (cross-machine 도달 보장)"
         )
     return _detect_tailscale_ip() or socket.gethostbyname(socket.gethostname())
