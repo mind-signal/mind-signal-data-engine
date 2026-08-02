@@ -455,6 +455,7 @@ class TestRunFullPipeline:
             "synchrony_score",
             "friendship_score",
             "score_params",
+            "score_meta",
             "pipeline_params",
             "dataframes",
         }

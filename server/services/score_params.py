@@ -5,6 +5,7 @@
 결과에 실어 어떤 설정으로 나온 점수인지 사후 구분 가능하게 함.
 """
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -41,6 +42,7 @@ class ScoreParams:
         trim_start_sec: 측정 앞쪽 제외 구간 초임. 정본은 baseline과 같은 30초
         trim_end_sec: 측정 뒤쪽 제외 구간 초임. 정본은 제외하지 않음(0)
         min_analysis_sec: trim 이후 유효 구간의 최소 초임
+        min_synchrony_pairs: 상관을 낼 최소 유효 쌍 수임
     """
 
     w_sync: float = 1.0
@@ -57,13 +59,31 @@ class ScoreParams:
     trim_start_sec: int = 30
     trim_end_sec: int = 0
     min_analysis_sec: int = 180
+    # 상관을 낼 최소 유효 쌍 수임. 동조율 산출 계약의 일부라 원장에 함께 실음
+    min_synchrony_pairs: int = 10
 
     def __post_init__(self) -> None:
-        """가중치 부호와 합, 상관 방식의 유효성을 검사함
+        """가중치와 구간과 상관 방식의 유효성을 검사함
+
+        설정을 실험용으로 열어 둔 구조라 잘못된 값은 반드시 들어옴. 로딩
+        지점에서 거부하지 않으면 음수 trim이 예외 없이 엉뚱한 구간을 자르고
+        nan 가중치가 검증을 다 통과해 응답 직렬화에서 터짐.
 
         Raises:
-            ValueError: 가중치가 음수이거나 합이 0 이하이거나 미지원 상관 방식임
+            ValueError: 가중치가 음수이거나 비유한이거나 합이 0 이하인 경우,
+                구간이 음수인 경우, 미지원 상관 방식인 경우임
         """
+        if not all(math.isfinite(w) for w in (self.w_sync, self.w_faa)):
+            raise ValueError(
+                f"가중치는 유한해야 함. w_sync={self.w_sync} w_faa={self.w_faa}"
+            )
+        for name in ("trim_start_sec", "trim_end_sec", "min_analysis_sec"):
+            if getattr(self, name) < 0:
+                raise ValueError(
+                    f"{name}는 음수일 수 없음. 받은 값 {getattr(self, name)}"
+                )
+        if self.min_synchrony_pairs < 2:
+            raise ValueError("min_synchrony_pairs는 2 이상이어야 함")
         if self.w_sync < 0 or self.w_faa < 0:
             raise ValueError(
                 f"가중치는 음수일 수 없음. w_sync={self.w_sync} w_faa={self.w_faa}"
@@ -119,14 +139,18 @@ class ScoreParams:
         return cls(
             w_sync=_env_float("FS_W_SYNC", base.w_sync),
             w_faa=_env_float("FS_W_FAA", base.w_faa),
-            corr_method=os.getenv("FS_CORR_METHOD", base.corr_method).strip()
+            # 대소문자를 정규화함. 오타 하나가 모듈 로드 실패로 이어지지 않게 함
+            corr_method=os.getenv("FS_CORR_METHOD", base.corr_method).strip().lower()
             or base.corr_method,
             sync_channels=channels,
-            sync_band=os.getenv("FS_SYNC_BAND", base.sync_band).strip()
+            sync_band=os.getenv("FS_SYNC_BAND", base.sync_band).strip().lower()
             or base.sync_band,
             trim_start_sec=_env_int("FS_TRIM_START_SEC", base.trim_start_sec),
             trim_end_sec=_env_int("FS_TRIM_END_SEC", base.trim_end_sec),
             min_analysis_sec=_env_int("MIN_ANALYSIS_SECONDS", base.min_analysis_sec),
+            min_synchrony_pairs=_env_int(
+                "FS_MIN_SYNCHRONY_PAIRS", base.min_synchrony_pairs
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -141,5 +165,6 @@ class ScoreParams:
             "trim_start_sec": self.trim_start_sec,
             "trim_end_sec": self.trim_end_sec,
             "min_analysis_sec": self.min_analysis_sec,
+            "min_synchrony_pairs": self.min_synchrony_pairs,
             "required_total_sec": self.required_total_sec,
         }

@@ -5,6 +5,8 @@
 잘라 0점을 냈고 그것이 가장 큰 왜곡이었음).
 """
 
+import math
+
 from server.services.score_params import ScoreParams
 
 
@@ -38,7 +40,10 @@ def compute_friendship_score(
     """
     meta: dict = {"terms": []}
 
-    if synchrony is None:
+    # nan을 그냥 흘리면 아래 clamp에서 max(0.0, nan)이 0.0을 내어 미측정이
+    # 완전 역상관과 같은 값이 됨. 상류(_correlate_pair)가 이미 막지만 이 함수도
+    # 공개 진입점이라 방어를 한 곳에만 두지 않음
+    if synchrony is None or not math.isfinite(synchrony):
         meta["reason"] = "synchrony_missing"
         return None, meta
 

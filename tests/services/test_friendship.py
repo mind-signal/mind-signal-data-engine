@@ -65,6 +65,12 @@ class TestFriendshipScore:
         assert score is None
         assert meta["reason"] == "no_effective_term"
 
+    def test_nan_synchrony_is_none_not_zero(self):
+        """nan은 clamp에서 0으로 접히므로 명시적으로 미산출 처리함"""
+        score, meta = compute_friendship_score(float("nan"), None, ScoreParams())
+        assert score is None
+        assert meta["reason"] == "synchrony_missing"
+
     def test_avoidance_out_of_range_raises(self):
         """회피율은 [0, 1] 계약임"""
         with pytest.raises(ValueError):
@@ -84,6 +90,21 @@ class TestScoreParams:
         """필요 측정 시간은 상수가 아니라 trim에서 파생됨"""
         assert ScoreParams().required_total_sec == 210
         assert ScoreParams(trim_start_sec=45).required_total_sec == 225
+
+    def test_negative_trim_rejected(self):
+        """음수 trim은 iloc 슬라이스를 조용히 뒤집으므로 로딩에서 거부함"""
+        with pytest.raises(ValueError):
+            ScoreParams(trim_start_sec=-5)
+
+    def test_non_finite_weight_rejected(self):
+        """nan 가중치는 부호 검사를 전부 통과해 결과가 nan이 됨"""
+        with pytest.raises(ValueError):
+            ScoreParams(w_sync=float("nan"))
+
+    def test_corr_method_env_is_case_insensitive(self, monkeypatch):
+        """설정 오타 하나가 모듈 로드 실패로 이어지지 않게 함"""
+        monkeypatch.setenv("FS_CORR_METHOD", "Spearman")
+        assert ScoreParams.from_env().corr_method == "spearman"
 
     def test_negative_weight_rejected(self):
         with pytest.raises(ValueError):

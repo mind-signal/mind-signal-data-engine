@@ -206,10 +206,19 @@ def align_on_second(
     return frames[0].merge(frames[1], on="sec", how="inner", suffixes=("_1", "_2"))
 
 
-MIN_SYNCHRONY_PAIRS = 10
-
-
 SYNC_SERIES_COLUMN = "_sync_series"
+
+# 산출 메타의 고정 키 집합임. 어느 경로로 나가든 같은 키가 나오게 해서
+# 하류가 키 존재를 가정할 수 있게 함
+_EMPTY_SCORE_META: dict = {
+    "corr_method": None,
+    "sync_columns_used": [],
+    "n_pairs": 0,
+    "sync_secondary": None,
+    "terms": [],
+    "w_effective": None,
+    "reason": None,
+}
 
 
 def resolve_sync_columns(
@@ -260,13 +269,13 @@ def _correlate_pair(
         # timestamp 부재 시 구 위치 정렬로 폴백함 (합성 픽스처 호환)
         logger.warning("timestamp 컬럼 부재로 위치 기반 정렬 폴백함")
         min_len = min(len(df1), len(df2))
-        if min_len < MIN_SYNCHRONY_PAIRS:
+        if min_len < params.min_synchrony_pairs:
             return None, min_len
         series1 = df1[column].values[:min_len]
         series2 = df2[column].values[:min_len]
         n_pairs = min_len
     else:
-        if len(aligned) < MIN_SYNCHRONY_PAIRS:
+        if len(aligned) < params.min_synchrony_pairs:
             return None, len(aligned)
         series1 = aligned[f"{column}_1"].values
         series2 = aligned[f"{column}_2"].values
@@ -732,6 +741,7 @@ def run_full_pipeline(
             "synchrony_score": None,
             "friendship_score": None,
             "score_params": _resolve_params(params).to_dict(),
+            "score_meta": {**_EMPTY_SCORE_META, "reason": "no_usable_csv"},
             "pipeline_params": {
                 "stimulus_duration_sec": stimulus_duration_sec,
                 "window_size_sec": window_size_sec,
@@ -825,14 +835,17 @@ def run_full_pipeline(
             y_score = compute_y(satisfaction_scores[idx_a], satisfaction_scores[idx_b])
 
     # 동조율과 Friendship Score 산출함. 입력은 반드시 raw_dataframes임 —
-    # normalized 쪽은 band_cols만 남아 채널별 열(Pz_gamma)이 사라짐
+    # normalized 쪽은 band_cols만 남아 채널별 열(T7_gamma 등)이 사라짐.
+    # 대상은 feature 산출에 성공한 subject로 한정함 — 계약 위반으로 분석에서
+    # 빠진 subject의 원본으로 점수를 내면 pair_features는 None인데 점수만
+    # 나오는 상태가 됨(판정 기준을 pair_features와 통일함)
     score_params = _resolve_params(params)
     synchrony_score = None
-    sync_meta: dict = {}
-    if len(raw_dataframes) == 2:
-        keys = list(raw_dataframes.keys())
+    sync_meta: dict = {"reason": "insufficient_subjects"}
+    usable = [idx for idx in subject_indices if idx in subject_features]
+    if len(usable) == 2:
         synchrony_score, sync_meta = compute_synchrony(
-            raw_dataframes[keys[0]], raw_dataframes[keys[1]], score_params
+            raw_dataframes[usable[0]], raw_dataframes[usable[1]], score_params
         )
 
     # 1단계는 FAA 회피율이 없으므로 avoidance_rate=None임 (2단계에서 연결)
@@ -847,7 +860,11 @@ def run_full_pipeline(
         "y_score": y_score,
         "synchrony_score": synchrony_score,
         "friendship_score": friendship_score,
-        "score_params": {**score_params.to_dict(), **sync_meta, **score_meta},
+        # 설정 원장과 산출 메타를 섞지 않음. 섞으면 경로마다 키 집합이 달라져
+        # 하류가 키 존재를 가정할 수 없고, corr_method처럼 양쪽에 있는 키가
+        # 조용히 덮어써짐. score_params는 항상 같은 키를 낸다
+        "score_params": score_params.to_dict(),
+        "score_meta": {**_EMPTY_SCORE_META, **sync_meta, **score_meta},
         "pipeline_params": {
             "stimulus_duration_sec": stimulus_duration_sec,
             "window_size_sec": window_size_sec,
