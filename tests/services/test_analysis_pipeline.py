@@ -234,6 +234,8 @@ class TestSplitStimulusWindows:
 
 
 class TestExtractFeatures:
+    """[TS-ANALYSIS-02] 뇌파 주파수 지표 계산."""
+
     def _make_windows(self, n_stim=2, n_win=2, band_cols=None):
         """테스트용 windows 구조 생성함"""
         if band_cols is None:
@@ -426,6 +428,8 @@ class TestComputeY:
 
 
 class TestRunFullPipeline:
+    """[TS-ANALYSIS-04] DUAL 모드 반응 유사도 계산."""
+
     @pytest.fixture(autouse=True)
     def _mock_io(self, monkeypatch, full_session_df):
         """CSV I/O와 MindSignalAnalyzer를 mock함"""

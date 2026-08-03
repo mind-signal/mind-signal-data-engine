@@ -9,7 +9,10 @@ from tests.conftest import TEST_GROUP_ID, TEST_SECRET  # noqa: F401
 
 
 class TestAnalyzePipelineEndpoint:
-    """POST /api/analyze/pipeline 엔드포인트 검증함"""
+    """[TS-ANALYSIS-08] 인증 없는 분석 파이프라인 요청 거부.
+
+    POST /api/analyze/pipeline 엔드포인트 검증함
+    """
 
     def test_missing_secret_header_returns_422(self, test_client):
         """Header 미제공 시 FastAPI validation error (422) 반환함"""
@@ -288,7 +291,10 @@ class TestAnalyzePipelineEndpoint:
 
 
 class TestAnalyzePipelineModeField:
-    """mode / algorithm 필드 검증 테스트 수행함"""
+    """[TS-ANALYSIS-09] 정의되지 않은 분석 모드 요청 거부.
+
+    mode / algorithm 필드 검증 테스트 수행함
+    """
 
     @patch("server.services.analysis.run_full_pipeline")
     def test_omitting_mode_defaults_to_dual(

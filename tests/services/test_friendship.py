@@ -22,7 +22,10 @@ def _session(start: str, n: int, values: dict[str, np.ndarray]) -> pd.DataFrame:
 
 
 class TestFriendshipScore:
-    """가중 합과 정규화 계약 검증함"""
+    """[TS-AI-01] 뇌파 통합 분석 궁합 점수 산출 (설문은 제거됨).
+
+    가중 합과 정규화 계약 검증함
+    """
 
     def test_zero_correlation_is_fifty(self):
         """[핵심 회귀] 상관 0은 0점이 아니라 50점임"""
