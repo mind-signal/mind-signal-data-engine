@@ -33,7 +33,10 @@ def test_constant_dc_input_yields_zero_band_power():
 
 
 def test_alpha_rms_recovers_true_amplitude():
-    """[회귀 B] 10Hz 20uV 알파의 RMS 회복률이 참값의 95~105%여야 함"""
+    """[TS-ANALYSIS-01] 주파수 대역별 파워 계산.
+
+    [회귀 B] 10Hz 20uV 알파의 RMS 회복률이 참값의 95~105%여야 함
+    """
     powers = MindSignalAnalyzer().get_all_powers(_tone(10.0))
     ratio = powers["alpha"] / TRUE_RMS
     assert 0.95 <= ratio <= 1.05
@@ -77,7 +80,7 @@ def test_alpha_recovery_is_phase_stable(phase_index):
 
 
 def test_dc_level_does_not_change_result():
-    """DC 준위가 3000/4200/5000으로 달라져도 알파 값이 동일해야 함"""
+    """[TS-ANALYSIS-10] DC 준위가 3000/4200/5000으로 달라져도 알파 값이 동일해야 함"""
     analyzer = MindSignalAnalyzer()
     values = [
         analyzer.get_all_powers(_tone(10.0, dc=dc))["alpha"]
