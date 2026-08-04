@@ -100,7 +100,8 @@ async def lifespan(app: FastAPI):
        dual heartbeat (backward-compat)
     2) subject_index만 env → pending 상태 기동 → register_to_backend_pending
        retry + /control/assign-group 대기 (heartbeat 미생성)
-    3) 둘 다 없음 → SEQUENTIAL register + single heartbeat (backward-compat)
+    3) 둘 다 없음 → 1PC legacy register + single heartbeat.
+       BE 의 legacy 단일 slot 을 채우고 BTI 폴백 분석이 그 slot 을 사용함
 
     분기 1~3 은 be 모드(ALIGNMENT_LOCATION=be, 기본값) 전용임.
     """
@@ -249,7 +250,7 @@ async def lifespan(app: FastAPI):
                     f"awaiting POST /control/assign-group"
                 )
             else:
-                # 분기 3: SEQUENTIAL (backward-compat)
+                # 분기 3: 1PC legacy 등록. BTI 폴백이 이 slot 을 사용함
                 await register_to_backend(public_url, settings.engine_secret_key)
                 app.state.heartbeat_task = asyncio.create_task(
                     start_heartbeat(public_url, settings.engine_secret_key)
