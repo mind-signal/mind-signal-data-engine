@@ -379,7 +379,6 @@ class PipelineRequest(BaseModel):
     satisfaction_scores: dict[int, float] | None = None
     include_markdown: bool = False
     mode: Literal["DUAL", "BTI", "DUAL_2PC"] = "DUAL"
-    algorithm: str = "default"
 
 
 def _make_subject_feature(
