@@ -12,7 +12,6 @@ from server.services.analysis import (
     CSV_BASE_DIR,
     AnalysisContractError,
     WindowSlot,
-    analyze_pipeline_sequential,
     average_by_timestamp,
     build_pair_features,
     compute_baseline,
@@ -882,132 +881,12 @@ def test_live_csv_regression_uses_symmetric_absolute_window_keys():
 
 
 # ──────────────────────────────────────────────
-# TestAnalyzePipelineSequential
+# TestRunFullPipelineDualRegression
 # ──────────────────────────────────────────────
 
 
-class TestAnalyzePipelineSequential:
-    """SEQUENTIAL 모드 분기 analyze_pipeline_sequential 검증함"""
-
-    @pytest.fixture
-    def waves_df(self):
-        """5대역 + EmotivMetrics 컬럼을 포함한 최소 측정 DataFrame 반환함"""
-        np.random.seed(1)
-        n = 60  # TRIM_START(15) + effective(30) + TRIM_END(15) 최소 충족
-        data = {
-            "delta": np.random.uniform(0.1, 1.0, n),
-            "theta": np.random.uniform(0.1, 1.0, n),
-            "alpha": np.random.uniform(0.1, 1.0, n),
-            "beta": np.random.uniform(0.1, 1.0, n),
-            "gamma": np.random.uniform(0.1, 1.0, n),
-            "focus": np.random.uniform(0, 1, n),
-            "engagement": np.random.uniform(0, 1, n),
-            "interest": np.random.uniform(0, 1, n),
-            "excitement": np.random.uniform(0, 1, n),
-            "stress": np.random.uniform(0, 1, n),
-            "relaxation": np.random.uniform(0, 1, n),
-        }
-        return pd.DataFrame(data)
-
-    def test_sequential_returns_similarity_features(self, monkeypatch, waves_df):
-        """SEQUENTIAL 모드 → similarity_features dict 반환함"""
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            lambda group_id, subject_index: [
-                Path(f"/fake/subject_{subject_index}_{group_id}.csv")
-            ],
-        )
-        monkeypatch.setattr(
-            "server.services.analysis.load_session_data",
-            lambda path: waves_df.copy(),
-        )
-        result = analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[1, 2])
-        assert isinstance(result["similarity_features"], dict)
-        assert "similarity_score" in result["similarity_features"]
-
-    def test_sequential_pair_features_is_none(self, monkeypatch, waves_df):
-        """SEQUENTIAL 모드 → pair_features=None (DUAL 전용 필드)"""
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            lambda group_id, subject_index: [
-                Path(f"/fake/subject_{subject_index}_{group_id}.csv")
-            ],
-        )
-        monkeypatch.setattr(
-            "server.services.analysis.load_session_data",
-            lambda path: waves_df.copy(),
-        )
-        result = analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[1, 2])
-        assert result["pair_features"] is None
-
-    def test_sequential_csv_not_found_raises_value_error(self, monkeypatch):
-        """subject 첫 번째 인덱스 CSV 없을 때 ValueError 발생함"""
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            lambda group_id, subject_index: [],
-        )
-        with pytest.raises(ValueError, match="CSV 미발견"):
-            analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[1, 2])
-
-    def test_sequential_csv_not_found_subject2_raises_value_error(
-        self, monkeypatch, waves_df
-    ):
-        """subject 1은 CSV 있지만 subject 2 CSV 없을 때 ValueError 발생함"""
-
-        def mock_find(group_id, subject_index):
-            if subject_index == 1:
-                return [Path(f"/fake/subject_1_{group_id}.csv")]
-            return []
-
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            mock_find,
-        )
-        monkeypatch.setattr(
-            "server.services.analysis.load_session_data",
-            lambda path: waves_df.copy(),
-        )
-        with pytest.raises(ValueError, match="CSV 미발견"):
-            analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[1, 2])
-
-    def test_sequential_uses_provided_indices_not_hardcoded(
-        self, monkeypatch, waves_df
-    ):
-        """subject_indices=[5, 7] → 실제 5, 7 인덱스로 CSV 탐색 수행함"""
-        called_indices = []
-
-        def mock_find(group_id, subject_index):
-            called_indices.append(subject_index)
-            return [Path(f"/fake/subject_{subject_index}_{group_id}.csv")]
-
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            mock_find,
-        )
-        monkeypatch.setattr(
-            "server.services.analysis.load_session_data",
-            lambda path: waves_df.copy(),
-        )
-        result = analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[5, 7])
-        assert 5 in called_indices
-        assert 7 in called_indices
-        assert 1 not in called_indices
-        assert 2 not in called_indices
-        # 반환된 subjects 인덱스도 5, 7이어야 함
-        subject_idx_in_result = [s["subject_index"] for s in result["subjects"]]
-        assert subject_idx_in_result == [5, 7]
-
-    def test_sequential_single_index_raises_value_error(self, monkeypatch):
-        """subject_indices=[1] (길이 != 2) → ValueError 발생함"""
-        monkeypatch.setattr(
-            "server.services.analysis.find_csv_files",
-            lambda group_id, subject_index: [],
-        )
-        with pytest.raises(
-            ValueError,
-            match="SEQUENTIAL mode requires exactly 2 subject_indices",
-        ):
-            analyze_pipeline_sequential(TEST_GROUP_ID, subject_indices=[1])
+class TestRunFullPipelineDualRegression:
+    """DUAL 파이프라인 회귀 — SESSION-W002 로 SEQUENTIAL 클래스가 사라지면서 이동함"""
 
     def test_dual_regression_pair_features_not_none(self, monkeypatch, full_session_df):
         """DUAL 모드 기존 run_full_pipeline 동작 유지 — pair_features 존재함"""

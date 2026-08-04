@@ -378,7 +378,7 @@ class PipelineRequest(BaseModel):
     params: PipelineParams = PipelineParams()
     satisfaction_scores: dict[int, float] | None = None
     include_markdown: bool = False
-    mode: Literal["DUAL", "SEQUENTIAL", "BTI", "DUAL_2PC"] = "DUAL"
+    mode: Literal["DUAL", "BTI", "DUAL_2PC"] = "DUAL"
     algorithm: str = "default"
 
 
@@ -403,29 +403,12 @@ async def analyze_pipeline(
 ):
     """파이프라인 분석 mock 응답 반환함.
 
-    DUAL / BTI / DUAL_2PC / SEQUENTIAL 모드별 응답 형식을
+    DUAL / BTI / DUAL_2PC 모드별 응답 형식을
     실제 DE `analyze.py` 계약 그대로 재현함.
     """
     _check_secret(x_engine_secret)
     offset = _phase_offset()
     band_cols = body.params.band_cols
-
-    if body.mode == "SEQUENTIAL":
-        # SEQUENTIAL: subjects 빈 리스트 + similarity_features 반환함
-        return {
-            "group_id": body.group_id,
-            "subjects": [],
-            "pair_features": None,
-            "y_score": None,
-            "synchrony_score": None,
-            "pipeline_params": {},
-            "markdown": None,
-            "similarity_features": {
-                "mode": "SEQUENTIAL",
-                "cosine": round(0.72 + 0.05 * math.sin(offset), 4),
-                "pearson": round(0.68 + 0.05 * math.cos(offset), 4),
-            },
-        }
 
     # DUAL / BTI / DUAL_2PC — run_full_pipeline 계약 재현함
     subjects = [

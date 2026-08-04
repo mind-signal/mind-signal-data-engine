@@ -80,8 +80,7 @@ class PipelineRequest(BaseModel):
     params: PipelineParams = Field(default_factory=PipelineParams)
     satisfaction_scores: dict[int, float] | None = None  # {1: 7.5, 2: 6.0}
     include_markdown: bool = False
-    mode: Literal["DUAL", "SEQUENTIAL", "BTI", "DUAL_2PC"] = "DUAL"  # 실험 모드 선택
-    algorithm: str = "default"  # SEQUENTIAL 전용 유사도 알고리즘 선택
+    mode: Literal["DUAL", "BTI", "DUAL_2PC"] = "DUAL"  # 분석 파이프라인 선택
 
 
 class SubjectFeatureResult(BaseModel):
@@ -118,7 +117,8 @@ class PipelineResponse(BaseModel):
     score_meta: dict | None = None
     pipeline_params: dict
     markdown: str | None = None
-    similarity_features: dict | None = None  # SEQUENTIAL 모드 전용 유사도 결과
+    # DUAL_2PC 경로가 메타데이터를 채움. 과거 SEQUENTIAL 문서에도 값이 있음
+    similarity_features: dict | None = None
 
 
 @router.post("/analyze/pipeline")
@@ -134,27 +134,7 @@ async def analyze_pipeline(
         )
 
     # 2. 모드별 파이프라인 분기 실행함
-    if body.mode == "SEQUENTIAL":
-        # SEQUENTIAL 모드: 시분할 측정 결과의 반응 유사도 계산 수행함
-        from server.services.analysis import analyze_pipeline_sequential
-
-        seq_result = analyze_pipeline_sequential(
-            group_id=body.group_id,
-            subject_indices=body.subject_indices,
-            algorithm=body.algorithm,
-        )
-        # SEQUENTIAL 응답: BE는 similarity_features 사용, subjects는 빈 리스트 반환함
-        return PipelineResponse(
-            group_id=body.group_id,
-            subjects=[],
-            similarity_features=seq_result["similarity_features"],
-            pair_features=None,
-            y_score=None,
-            synchrony_score=None,
-            pipeline_params={},
-        )
-
-    elif body.mode == "DUAL_2PC":
+    if body.mode == "DUAL_2PC":
         # v7 C-1: DUAL_2PC는 기존 run_full_pipeline 재활용 (DUAL/BTI와 동일 입력 구조)
         # BE가 두 subject 각각의 CSV를 정렬된 상태로 업로드하므로 subject_indices=[1,2] 전달
         from server.services.analysis import run_full_pipeline
