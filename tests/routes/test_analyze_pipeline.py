@@ -337,3 +337,25 @@ class TestAnalyzePipelineModeField:
         assert response.status_code == 200
         # similarity_features 필드가 없거나 None임
         assert data.get("similarity_features") is None
+
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_dual_2pc_success_sets_similarity_features_metadata(
+        self, mock_pipeline, test_client, pipeline_secret_header, valid_pipeline_result
+    ):
+        """mode=DUAL_2PC 성공 응답에 similarity_features 메타데이터 실림.
+
+        SESSION-W002가 SEQUENTIAL 테스트를 지우면서 similarity_features 의
+        유일한 positive 검증이 사라져 이 테스트로 대체함.
+        """
+        mock_pipeline.return_value = valid_pipeline_result
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "mode": "DUAL_2PC",
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 200
+        assert response.json()["similarity_features"] == {"mode": "DUAL_2PC"}
