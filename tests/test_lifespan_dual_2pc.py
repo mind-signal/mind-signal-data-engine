@@ -45,7 +45,7 @@ async def test_lifespan_placeholder_secret_warns_but_continues(
     # .env.local의 ALIGNMENT_LOCATION=proxy 오염 차단 — be-mode 경로 명시적 검증함
     monkeypatch.setattr(settings, "alignment_location", "be")
 
-    # SEQUENTIAL register 모의함
+    # 1PC legacy register 모의함
     httpx_mock.add_response(url=BACKEND_URL, method="POST", status_code=200)
 
     with patch.object(webhook, "HEARTBEAT_INTERVAL_SEC", 3600):
@@ -141,7 +141,11 @@ async def test_lifespan_empty_string_group_id_treated_as_pending(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lifespan_single_legacy_register(monkeypatch, httpx_mock):
-    """분기 3 — 둘 다 없음 → SEQUENTIAL register + single heartbeat 확인함"""
+    """분기 3 — 둘 다 없음 → 1PC legacy register + single heartbeat 확인함.
+
+    이름만 legacy 이지 죽은 경로가 아님. BE 의 단일 slot 을 채우고 BTI 폴백
+    분석이 그 slot 을 읽으므로 삭제 금지 (SESSION-W002 T5).
+    """
     monkeypatch.setattr(settings, "engine_secret_key", TEST_VALID_SECRET)
     monkeypatch.setattr(settings, "dual_2pc_group_id", None)
     monkeypatch.setattr(settings, "dual_2pc_subject_index", None)

@@ -133,7 +133,7 @@ async def register_to_proxy(
 
 
 async def start_heartbeat(public_url: str, secret_key: str):
-    """주기적으로 백엔드에 엔진 URL을 재등록하는 heartbeat 태스크임 (SEQUENTIAL mode 전용)"""
+    """주기적으로 백엔드에 엔진 URL을 재등록하는 heartbeat 태스크임 (1PC legacy 등록 전용)"""
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
         try:
