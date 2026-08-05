@@ -149,6 +149,7 @@ mind-signal-data-engine/
 ├── scripts/                 # 진단 · E2E 스크립트 (BLE 테스트 등)
 ├── certificates/            # Emotiv 연결용 SSL 인증서 (Git 추적 제외, 신규 머신마다 수동 배치 필요)
 ├── docs/                    # 레포 로컬 보조 문서
+├── .agents/rules/           # AGENTS.md 본문의 상세 확장 (코드 스타일, 커밋, Redis/분석 계약, 트러블슈팅 등)
 ├── AGENTS.md                # 에이전트 공통 지시 (정본)
 ├── CLAUDE.md                # AGENTS.md + .agents/rules import
 ├── .env.example             # 환경 변수 가이드 (Git 추적)

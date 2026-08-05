@@ -2,7 +2,7 @@
 
 모든 에이전트(Claude Code / Codex CLI / 기타 모델)가 이 프로젝트에서 작업할 때 반드시 읽어야 할 공통 지시. Claude 전용 메타는 `CLAUDE.md` 참조.
 
-> 본 문서는 자가완결 — 클론 상태만으로 동작해야 함(형제 문서 `.plans/README.md`는 상위 워크스페이스에 있고 이 레포엔 없음). 상세는 `.agents/rules/*.md` 참조 (단방향: 본문이 1차 소스).
+> 본 문서는 자가완결 — 이 레포 클론만으로 개발·검증·커밋이 가능해야 함. 상세는 `.agents/rules/*.md` 참조 (단방향: 본문이 1차 소스). 예외: 아래 "계획 산출물 위치" 절의 `.plans/` 정본 파일들은 상위 워크스페이스(`Team-project/mind-signal/.plans/`)에 있는 팀 작업 맥락 참조용이라 이 레포 클론에는 없을 수 있음 — 판단에 필요한 요지는 그 절 본문에 남겨둠.
 
 ---
 
@@ -106,7 +106,7 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 - **Cortex 연결 오류**: Emotiv App 실행 확인, `CLIENT_ID`/`CLIENT_SECRET`이 `.env.local`에 있는지 확인, Emotiv App 자체가 계정에 로그인돼 있는지 확인.
 - **Redis 연결 오류**: `cd ../mind-signal-backend && docker-compose up -d`.
-- **패키지 오류**: `conda activate mind-signal && pip install -r requirements.txt`. 참고: `requirements.txt:23`이 원본 머신에 남아있던 로컬 파일 경로(`file:///C:/miniconda3/conda-bld/...`)로 `packaging`을 고정해놔서 새 클론에서는 해석 실패함. `pip freeze`로 재생성하거나 그 줄을 지우고 pip가 `packaging`을 정상 해석하게 둘 것.
+- **패키지 오류**: `conda activate mind-signal && pip install -r requirements.txt`. 참고: `requirements.txt`의 `packaging` 항목이 원본 머신에 남아있던 로컬 파일 경로(`file:///C:/miniconda3/conda-bld/...`)로 고정돼 있어서 새 클론에서는 해석 실패함. `pip freeze`로 재생성하거나 그 줄을 지우고 pip가 `packaging`을 정상 해석하게 둘 것.
 - **Python 경로**: `conda activate mind-signal`을 먼저 안 하면 시스템 Python(3.13/3.9)이 잡혀 의존성이 깨짐.
 
 상세 증상(헤드셋 즉시종료, cross-machine 엔진 도달 불가 등): `.agents/rules/troubleshooting.md`.
@@ -115,9 +115,11 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 ## 계획 산출물 위치 (2026-07-31 갱신, DOCS-W005)
 
-mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나, `Team-project/mind-signal/.plans/`에 둔다. 이 레포의 로컬 `.plans/`(git 밖)는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 담는다 — 여기에 작업 폴더를 새로 만들지 말 것.
+mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나, `Team-project/mind-signal/.plans/`에 둔다. **이 정본 파일들은 이 레포 밖(상위 워크스페이스)에 있으므로, 이 레포만 클론한 환경에서는 접근할 수 없을 수 있다** — 그런 환경에서는 아래 요지만으로 판단하고, 실제 `.plans/` 조작이 필요하면 상위 워크스페이스 접근이 별도로 필요함을 알 것. 이 레포의 로컬 `.plans/`(git 밖)는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 담는다 — 여기에 작업 폴더를 새로 만들지 말 것.
 
 `Team-project/.plans/`(루트)와 혼동하지 말 것 — 그쪽은 2026-07-30 통합 이후 크로스 프로젝트 메타 전용이고, 폴더에 번호가 붙어 있어도 MindSignal 계획은 없다.
+
+판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인(`ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS`)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
 
 - 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)

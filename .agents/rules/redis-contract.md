@@ -45,17 +45,30 @@ Source: the publish call in `core/streamer.py` (search for the `"type": "brain_s
 
 Also published on the same channel, by `_publish_health()` and `on_headset_disconnected()` in `core/streamer.py`.
 
+Watchdog-triggered alerts (`no_data`, `metrics_stale`) include `silentSeconds` — seconds of no signal, published by `_publish_health()`:
+
 ```json
 {
   "type": "headset_status",
-  "status": "no_data | metrics_stale | disconnected",
+  "status": "no_data | metrics_stale",
   "subjectIndex": 1,
   "groupId": "<string>",
   "silentSeconds": 0
 }
 ```
 
-`silentSeconds` is only present on watchdog-triggered alerts (`no_data`, `metrics_stale`), not on `disconnected`. The backend normalizes `status` — it keeps `disconnected` as-is and folds the others into `stale` (see `stream-health.service.ts` on the backend side).
+`disconnected` is published separately by `on_headset_disconnected()` and does not carry `silentSeconds` — the field is optional on this message type, present only for the two watchdog statuses:
+
+```json
+{
+  "type": "headset_status",
+  "status": "disconnected",
+  "subjectIndex": 1,
+  "groupId": "<string>"
+}
+```
+
+The backend normalizes `status` — it keeps `disconnected` as-is and folds the others into `stale` (see `stream-health.service.ts` on the backend side).
 
 ## Entry point
 

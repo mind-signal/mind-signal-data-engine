@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 `--break-system-packages` is not needed here — that flag exists for pip fighting an externally-managed *system* Python; inside an activated conda env it's the wrong tool and can mask a "you forgot to activate the env" mistake instead of fixing it.
 
-`requirements.txt:23` currently pins `packaging` to a local file path (`file:///C:/miniconda3/conda-bld/packaging_.../work`) left over from the machine that generated the lock file. This fails to resolve on any other machine. Until it's regenerated (`pip freeze` or a separate `requirements.lock.txt`), a fresh clone needs that line edited or dropped manually before install succeeds.
+`requirements.txt`'s `packaging` entry currently pins it to a local file path (`file:///C:/miniconda3/conda-bld/packaging_.../work`) left over from the machine that generated the lock file. This fails to resolve on any other machine. Until it's regenerated (`pip freeze` or a separate `requirements.lock.txt`), a fresh clone needs that line edited or dropped manually before install succeeds.
 
 ## Python path (common mistake)
 
@@ -48,6 +48,6 @@ Tailscale is the primary transport (a LAN-hotspot-primary setup was tried earlie
 
 **If setting `LAN_IP` manually, it must be that machine's Tailscale address (100.x.x.x)** — never a LAN/Wi-Fi IP.
 
-Two related env vars gate proxy mode: `REGISTRATION_MODE` (must be `local` when a proxy is in play — an `ngrok` value left over from an earlier setup will route the registration URL through the proxy's `/register` incorrectly) and `ALIGNMENT_LOCATION` + `PROXY_URL` (the pair that activates proxy mode; both default empty in `.env.example` so proxy mode is off unless explicitly configured).
+Two related env vars matter here, but they don't play the same role. `ALIGNMENT_LOCATION=proxy` is the sole switch that activates proxy mode (`core/main.py`'s `alignment_location` and `server/app.py`'s `proxy_mode = settings.alignment_location == "proxy"` both branch on this one value alone; it defaults to `be`, so proxy mode is off unless explicitly set). `PROXY_URL` is not part of that switch — it's a setting proxy mode needs once active, for registering with and forwarding data to the proxy; if `ALIGNMENT_LOCATION=proxy` is set but `PROXY_URL` is empty, `server/app.py`'s lifespan just warns and skips proxy registration, it doesn't fall back out of proxy mode. Also watch `REGISTRATION_MODE` (must be `local` when a proxy is in play — an `ngrok` value left over from an earlier setup will route the registration URL through the proxy's `/register` incorrectly).
 
 When migrating between phases/setups, audit `.env.local` and `.env.example` for stale values left over from a previous configuration — they're easy to leave behind and can silently break the next environment that inherits them.

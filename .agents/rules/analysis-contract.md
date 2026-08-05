@@ -20,6 +20,8 @@ This governs `core/analyzer.py` and anything computing band power, Synchrony, or
 
 Correlation coefficient between two subjects' brainwaves. **Since 2026-08-03 (ANALYSIS-W004): Spearman rank correlation over the temporal-parietal (T7, T8, Pz) gamma channel average.** Pearson correlation over the alpha spatial average was the prior implementation and is reachable only via `FS_CORR_METHOD=pearson`. The method and target channels are defined in `server/services/score_params.py`'s `ScoreParams`; the actual value used for a given analysis is recorded in that analysis's `score_params` output.
 
+**Caveat**: the canonical method is Spearman, and pipeline call sites reach it correctly because they pass `params.corr_method` explicitly. But `calculate_synchrony()`'s own default argument (`method: str = "pearson"`, `core/analyzer.py:55`) is still Pearson — it was not changed when the contract moved to Spearman. A direct call that omits `method` silently gets Pearson, not the canonical Spearman contract. Any new call site must pass `method` explicitly; don't rely on the default.
+
 ## Friendship Score
 
 The canonical composite score (0..100). **Not** Synchrony times 100 — it's a min-max normalized weighted sum, so zero correlation lands at 50 points, not 0. The FAA avoidance term is still disconnected pending phase 2 wiring.
