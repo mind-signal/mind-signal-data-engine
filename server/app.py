@@ -4,7 +4,6 @@ import socket
 from contextlib import asynccontextmanager
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -22,7 +21,7 @@ from server.services.webhook import (
     unregister_to_backend_pending,
 )
 
-load_dotenv(".env.local")
+# .env.local 로드는 server.config가 import 시점에 처리함(순서 의존 제거)
 
 # Preflight soft-check: ENGINE_SECRET_KEY가 placeholder면 WARNING 로그만 출력함
 # (Phase 17.5.1 — abort 제거). 실기기 테스트 등 placeholder 그대로 쓰다가 실험 후
@@ -83,7 +82,7 @@ def _resolve_advertise_ip(explicit: str | None) -> str:
         except ValueError:
             pass
         print(
-            f"[WARN] LAN_IP={explicit} 이(가) Tailscale 대역(100.64.0.0/10) 밖 — "
+            f"[WARN] LAN_IP={explicit!a} 이(가) Tailscale 대역(100.64.0.0/10) 밖이라 "
             "무시하고 자동탐지로 대체함 (cross-machine 도달 보장)"
         )
     return _detect_tailscale_ip() or socket.gethostbyname(socket.gethostname())
@@ -101,7 +100,8 @@ async def lifespan(app: FastAPI):
        dual heartbeat (backward-compat)
     2) subject_index만 env → pending 상태 기동 → register_to_backend_pending
        retry + /control/assign-group 대기 (heartbeat 미생성)
-    3) 둘 다 없음 → SEQUENTIAL register + single heartbeat (backward-compat)
+    3) 둘 다 없음 → 1PC legacy register + single heartbeat.
+       BE 의 legacy 단일 slot 을 채우고 BTI 폴백 분석이 그 slot 을 사용함
 
     분기 1~3 은 be 모드(ALIGNMENT_LOCATION=be, 기본값) 전용임.
     """
@@ -250,7 +250,7 @@ async def lifespan(app: FastAPI):
                     f"awaiting POST /control/assign-group"
                 )
             else:
-                # 분기 3: SEQUENTIAL (backward-compat)
+                # 분기 3: 1PC legacy 등록. BTI 폴백이 이 slot 을 사용함
                 await register_to_backend(public_url, settings.engine_secret_key)
                 app.state.heartbeat_task = asyncio.create_task(
                     start_heartbeat(public_url, settings.engine_secret_key)

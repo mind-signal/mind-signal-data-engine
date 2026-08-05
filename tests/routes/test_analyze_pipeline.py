@@ -9,7 +9,10 @@ from tests.conftest import TEST_GROUP_ID, TEST_SECRET  # noqa: F401
 
 
 class TestAnalyzePipelineEndpoint:
-    """POST /api/analyze/pipeline 엔드포인트 검증함"""
+    """[TS-ANALYSIS-08] 인증 없는 분석 파이프라인 요청 거부.
+
+    POST /api/analyze/pipeline 엔드포인트 검증함
+    """
 
     def test_missing_secret_header_returns_422(self, test_client):
         """Header 미제공 시 FastAPI validation error (422) 반환함"""
@@ -288,7 +291,10 @@ class TestAnalyzePipelineEndpoint:
 
 
 class TestAnalyzePipelineModeField:
-    """mode / algorithm 필드 검증 테스트 수행함"""
+    """[TS-ANALYSIS-09] 정의되지 않은 분석 모드 요청 거부.
+
+    mode / algorithm 필드 검증 테스트 수행함
+    """
 
     @patch("server.services.analysis.run_full_pipeline")
     def test_omitting_mode_defaults_to_dual(
@@ -302,90 +308,6 @@ class TestAnalyzePipelineModeField:
             headers=pipeline_secret_header,
         )
         assert response.status_code == 200
-
-    @patch("server.services.analysis.analyze_pipeline_sequential")
-    def test_mode_sequential_accepted(
-        self,
-        mock_seq_pipeline,
-        test_client,
-        pipeline_secret_header,
-    ):
-        """mode=SEQUENTIAL body → 422 없이 요청 수락함"""
-        mock_seq_pipeline.return_value = {
-            "group_id": TEST_GROUP_ID,
-            "subjects": [],
-            "similarity_features": {
-                "algorithm": "cosine_pearson_faa",
-                "similarity_score": 0.8,
-                "overall_cosine": 0.6,
-                "band_ratio_diff": {
-                    "delta": 0.1,
-                    "theta": 0.2,
-                    "alpha": 0.05,
-                    "beta": 0.15,
-                    "gamma": 0.1,
-                },
-                "faa_absolute_diff": None,
-            },
-            "pair_features": None,
-            "y_score": None,
-            "synchrony_score": None,
-        }
-        response = test_client.post(
-            "/api/analyze/pipeline",
-            json={
-                "group_id": TEST_GROUP_ID,
-                "subject_indices": [1, 2],
-                "mode": "SEQUENTIAL",
-            },
-            headers=pipeline_secret_header,
-        )
-        # SEQUENTIAL 분기에서 올바르게 처리되면 200 반환함
-        assert response.status_code == 200
-        data = response.json()
-        assert data["similarity_features"] is not None
-
-    @patch("server.services.analysis.analyze_pipeline_sequential")
-    def test_sequential_subject_indices_passed_through(
-        self,
-        mock_seq_pipeline,
-        test_client,
-        pipeline_secret_header,
-    ):
-        """mode=SEQUENTIAL + subject_indices=[1,2] → 서비스 호출 시 subject_indices 전달됨"""
-        mock_seq_pipeline.return_value = {
-            "group_id": TEST_GROUP_ID,
-            "subjects": [],
-            "similarity_features": {
-                "algorithm": "cosine_pearson_faa",
-                "similarity_score": 0.7,
-                "overall_cosine": 0.5,
-                "band_ratio_diff": {
-                    "delta": 0.1,
-                    "theta": 0.1,
-                    "alpha": 0.1,
-                    "beta": 0.1,
-                    "gamma": 0.1,
-                },
-                "faa_absolute_diff": None,
-            },
-            "pair_features": None,
-            "y_score": None,
-            "synchrony_score": None,
-        }
-        response = test_client.post(
-            "/api/analyze/pipeline",
-            json={
-                "group_id": TEST_GROUP_ID,
-                "subject_indices": [1, 2],
-                "mode": "SEQUENTIAL",
-            },
-            headers=pipeline_secret_header,
-        )
-        assert response.status_code == 200
-        # mock 호출 인수에 subject_indices=[1, 2]가 포함되어 있음
-        _, call_kwargs = mock_seq_pipeline.call_args
-        assert call_kwargs["subject_indices"] == [1, 2]
 
     def test_mode_invalid_returns_422(self, test_client, pipeline_secret_header):
         """mode=INVALID → 422 validation error 반환함"""
@@ -415,3 +337,25 @@ class TestAnalyzePipelineModeField:
         assert response.status_code == 200
         # similarity_features 필드가 없거나 None임
         assert data.get("similarity_features") is None
+
+    @patch("server.services.analysis.run_full_pipeline")
+    def test_dual_2pc_success_sets_similarity_features_metadata(
+        self, mock_pipeline, test_client, pipeline_secret_header, valid_pipeline_result
+    ):
+        """mode=DUAL_2PC 성공 응답에 similarity_features 메타데이터 실림.
+
+        SESSION-W002가 SEQUENTIAL 테스트를 지우면서 similarity_features 의
+        유일한 positive 검증이 사라져 이 테스트로 대체함.
+        """
+        mock_pipeline.return_value = valid_pipeline_result
+        response = test_client.post(
+            "/api/analyze/pipeline",
+            json={
+                "group_id": TEST_GROUP_ID,
+                "subject_indices": [1, 2],
+                "mode": "DUAL_2PC",
+            },
+            headers=pipeline_secret_header,
+        )
+        assert response.status_code == 200
+        assert response.json()["similarity_features"] == {"mode": "DUAL_2PC"}

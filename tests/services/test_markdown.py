@@ -4,6 +4,8 @@ from server.services.markdown import features_to_markdown
 
 
 class TestFeaturesToMarkdown:
+    """[TS-ANALYSIS-07] 마크다운 포함 분석 응답 반환."""
+
     def test_returns_string(self, sample_features):
         """반환 타입이 str임"""
         result = features_to_markdown(1, sample_features)

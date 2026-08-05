@@ -80,8 +80,7 @@ class PipelineRequest(BaseModel):
     params: PipelineParams = Field(default_factory=PipelineParams)
     satisfaction_scores: dict[int, float] | None = None  # {1: 7.5, 2: 6.0}
     include_markdown: bool = False
-    mode: Literal["DUAL", "SEQUENTIAL", "BTI", "DUAL_2PC"] = "DUAL"  # 실험 모드 선택
-    algorithm: str = "default"  # SEQUENTIAL 전용 유사도 알고리즘 선택
+    mode: Literal["DUAL", "BTI", "DUAL_2PC"] = "DUAL"  # 분석 파이프라인 선택
 
 
 class SubjectFeatureResult(BaseModel):
@@ -109,9 +108,17 @@ class PipelineResponse(BaseModel):
     pair_features: dict[str, float] | None = None
     y_score: float | None = None
     synchrony_score: float | None = None
+    # 정본 수식 점수임. 동조율에 100을 곱한 값이 아니라 민맥스 정규화 가중합이며
+    # 상관 0이 50점임. score_params에 실제 사용값 원장이 실림
+    friendship_score: float | None = None
+    # 설정 원장(score_params)과 산출 메타(score_meta)를 분리함. 원장은 항상
+    # 같은 키를 내고, 메타에는 사용한 열과 유효 쌍 수와 미산출 사유가 담김
+    score_params: dict | None = None
+    score_meta: dict | None = None
     pipeline_params: dict
     markdown: str | None = None
-    similarity_features: dict | None = None  # SEQUENTIAL 모드 전용 유사도 결과
+    # DUAL_2PC 경로가 메타데이터를 채움. 과거 SEQUENTIAL 문서에도 값이 있음
+    similarity_features: dict | None = None
 
 
 @router.post("/analyze/pipeline")
@@ -127,27 +134,7 @@ async def analyze_pipeline(
         )
 
     # 2. 모드별 파이프라인 분기 실행함
-    if body.mode == "SEQUENTIAL":
-        # SEQUENTIAL 모드: 시분할 측정 결과의 반응 유사도 계산 수행함
-        from server.services.analysis import analyze_pipeline_sequential
-
-        seq_result = analyze_pipeline_sequential(
-            group_id=body.group_id,
-            subject_indices=body.subject_indices,
-            algorithm=body.algorithm,
-        )
-        # SEQUENTIAL 응답: BE는 similarity_features 사용, subjects는 빈 리스트 반환함
-        return PipelineResponse(
-            group_id=body.group_id,
-            subjects=[],
-            similarity_features=seq_result["similarity_features"],
-            pair_features=None,
-            y_score=None,
-            synchrony_score=None,
-            pipeline_params={},
-        )
-
-    elif body.mode == "DUAL_2PC":
+    if body.mode == "DUAL_2PC":
         # v7 C-1: DUAL_2PC는 기존 run_full_pipeline 재활용 (DUAL/BTI와 동일 입력 구조)
         # BE가 두 subject 각각의 CSV를 정렬된 상태로 업로드하므로 subject_indices=[1,2] 전달
         from server.services.analysis import run_full_pipeline
@@ -169,6 +156,9 @@ async def analyze_pipeline(
             pair_features=result.get("pair_features"),
             y_score=result.get("y_score"),
             synchrony_score=result.get("synchrony_score"),
+            friendship_score=result.get("friendship_score"),
+            score_params=result.get("score_params"),
+            score_meta=result.get("score_meta"),
             pipeline_params=result.get("pipeline_params", {}),
             similarity_features={"mode": "DUAL_2PC"},  # 메타데이터
         )

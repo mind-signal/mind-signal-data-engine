@@ -1,5 +1,4 @@
 import logging
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from math import ceil
@@ -9,18 +8,37 @@ import numpy as np
 import pandas as pd
 
 from core.analyzer import MindSignalAnalyzer
+from server.services.friendship import compute_friendship_score
+from server.services.score_params import ScoreParams
 
 logger = logging.getLogger(__name__)
 
 # CSV 저장 기본 경로 (streamer.py와 동일한 위치)
 CSV_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "csv"
 
-# 측정 진정 구간 — 분석 제외, 표시만 함
-TRIM_START_SECONDS = 15
-TRIM_END_SECONDS = 15
+# 구간 상수의 정본은 ScoreParams임. 아래 세 이름은 하위 호환 별칭이며
+# **import 시점 스냅샷**이라 이후의 환경변수 변경을 반영하지 않음.
+# 런타임 값이 필요하면 ScoreParams.from_env()를 호출할 것
+try:
+    _DEFAULT_PARAMS = ScoreParams.from_env()
+except ValueError as exc:
+    # 잘못된 FS_ 값 하나로 서버가 통째로 못 뜨면 런처의 /health 게이트에서
+    # 원인 불명 기동 실패로 보임. 기본값으로 낮추고 무엇이 거부됐는지 남김
+    logger.error("점수 파라미터 환경변수가 유효하지 않아 기본값 사용함: %s", exc)
+    _DEFAULT_PARAMS = ScoreParams()
 
-# 최소 분석 가능 시간 (trimming 후 유효 구간 기준, 임시값 — 교수 확인 후 확정)
-MIN_ANALYSIS_SECONDS = int(os.getenv("MIN_ANALYSIS_SECONDS", 180))
+# 측정 진정 구간 — 분석 제외, 표시만 함
+TRIM_START_SECONDS = _DEFAULT_PARAMS.trim_start_sec
+TRIM_END_SECONDS = _DEFAULT_PARAMS.trim_end_sec
+
+# 최소 분석 가능 시간 (trimming 후 유효 구간 기준, 임시값 — 교수 확인 후 확정).
+# 실제 필요 측정 시간은 여기에 앞뒤 trim을 더한 ScoreParams.required_total_sec임
+MIN_ANALYSIS_SECONDS = _DEFAULT_PARAMS.min_analysis_sec
+
+
+def _resolve_params(params: ScoreParams | None) -> ScoreParams:
+    """생략된 파라미터를 모듈 기본값으로 채움"""
+    return params if params is not None else _DEFAULT_PARAMS
 
 
 class AnalysisContractError(Exception):
@@ -44,16 +62,20 @@ class WindowSlot:
     data: pd.DataFrame | None
 
 
-def classify_session_tier(total_samples: int) -> str:
+def classify_session_tier(total_samples: int, params: ScoreParams | None = None) -> str:
     """측정 시간 기반 세션 tier를 분류함 (1행 = 1초 가정)
 
+    판정 기준은 trim 이후 유효 구간이므로, VALID에 필요한 총 측정 시간은
+    params.required_total_sec임(기본값 210초). trim을 바꾸면 함께 흔들림.
+
     Returns:
-        "VALID" — 유효 구간 ≥ MIN_ANALYSIS_SECONDS
-        "PARTIAL" — trimming 후 > 0초, < MIN
-        "ABORTED" — trimming 후 ≤ 0초
+        "VALID" — 유효 구간이 min_analysis_sec 이상임
+        "PARTIAL" — trimming 후 0초 초과, 최소 미만임
+        "ABORTED" — trimming 후 0초 이하임
     """
-    effective = total_samples - TRIM_START_SECONDS - TRIM_END_SECONDS
-    if effective >= MIN_ANALYSIS_SECONDS:
+    resolved = _resolve_params(params)
+    effective = total_samples - resolved.trim_start_sec - resolved.trim_end_sec
+    if effective >= resolved.min_analysis_sec:
         return "VALID"
     elif effective > 0:
         return "PARTIAL"
@@ -61,19 +83,24 @@ def classify_session_tier(total_samples: int) -> str:
         return "ABORTED"
 
 
-def trim_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def trim_dataframe(
+    df: pd.DataFrame, params: ScoreParams | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """진정 구간 trimming 수행함
 
     Returns:
         (trimmed_df, baseline_df)
-        - trimmed_df: 유효 분석 구간 (시작 15초 ~ 종료-15초)
-        - baseline_df: 시작 15초 구간 (기저 뇌파 참조용)
+        - trimmed_df: 유효 분석 구간 (시작 trim 이후부터 종료 trim 이전까지)
+        - baseline_df: 시작 trim 구간 (기저 뇌파 참조용)
     """
+    resolved = _resolve_params(params)
     total = len(df)
-    end_trim = max(0, total - TRIM_END_SECONDS)
+    end_trim = max(0, total - resolved.trim_end_sec)
 
-    baseline_df = df.iloc[:TRIM_START_SECONDS].copy()
-    trimmed_df = df.iloc[TRIM_START_SECONDS:end_trim].copy().reset_index(drop=True)
+    baseline_df = df.iloc[: resolved.trim_start_sec].copy()
+    trimmed_df = (
+        df.iloc[resolved.trim_start_sec : end_trim].copy().reset_index(drop=True)
+    )
 
     return trimmed_df, baseline_df
 
@@ -82,7 +109,7 @@ def compute_baseline_from_warmup(
     baseline_df: pd.DataFrame,
     band_cols: list[str],
 ) -> dict[str, float]:
-    """시작 15초 진정 구간에서 기저 뇌파 평균을 추출함"""
+    """시작 trim 구간에서 기저 뇌파 평균을 추출함 (기본 30초)"""
     result = {}
     for band in band_cols:
         if band in baseline_df.columns:
@@ -185,39 +212,158 @@ def align_on_second(
     return frames[0].merge(frames[1], on="sec", how="inner", suffixes=("_1", "_2"))
 
 
-def compute_synchrony(df1: pd.DataFrame, df2: pd.DataFrame) -> float | None:
-    """두 피실험자 간 뇌파 동기화 점수를 계산함 (trimming 적용).
+SYNC_SERIES_COLUMN = "_sync_series"
 
-    각 피실험자의 진정 구간을 먼저 제거한 뒤 공통 절대시각 구간만 비교함.
-    측정 시작 시각이 어긋나도(2026-07-10 라이브: 38.3초 차이) 같은 시각끼리
-    맞대므로 시차가 상관에 섞이지 않음.
+# 산출 메타의 고정 키 집합임. 어느 경로로 나가든 같은 키가 나오게 해서
+# 하류가 키 존재를 가정할 수 있게 함
+_EMPTY_SCORE_META: dict = {
+    "corr_method": None,
+    "sync_columns_used": [],
+    "n_pairs": 0,
+    "sync_secondary": None,
+    "terms": [],
+    "w_effective": None,
+    # 동조율이 왜 없는가(sync_reason)와 점수가 왜 없는가(reason)는 다른 질문임.
+    # 한 키로 합치면 뒤에 병합되는 쪽이 앞을 덮어써 원인이 사라짐
+    "sync_reason": None,
+    "reason": None,
+}
+
+
+def resolve_sync_columns(
+    df1: pd.DataFrame, df2: pd.DataFrame, params: ScoreParams
+) -> list[str]:
+    """양쪽 DataFrame에 모두 있는 동조 대상 열을 고름.
+
+    정본은 측두-두정엽 셋(T7, T8, Pz)의 감마임. 채널별 열은 현행 37열 CSV에만
+    있으므로 구형 CSV에서는 공간평균 열로 폴백하되 **무엇을 썼는지 호출부가
+    결과에 남겨야 함** — 조용한 폴백은 나중에 "왜 점수가 다르지"를 만듦.
+
+    Returns:
+        선택된 열 이름 목록 반환. 쓸 열이 없으면 빈 목록 반환
     """
+    shared = set(df1.columns) & set(df2.columns)
+    channel_cols = [c for c in params.channel_columns if c in shared]
+    if channel_cols:
+        return channel_cols
+    if params.spatial_column in shared:
+        return [params.spatial_column]
+    return []
+
+
+def _sync_series(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """대상 열들의 채널 평균을 단일 시계열 열로 만든 DataFrame 반환함.
+
+    채널 평균은 정본이 지정한 영역 전체를 하나의 시계열로 다루기 위함이며,
+    단일 채널보다 창당 추정 잡음이 상쇄됨.
+    """
+    # 한 채널이라도 결측이면 그 행을 NaN으로 둠(DataFrame.mean에는 min_count가
+    # 없어 마스크로 처리함). skipna 기본값 그대로면 행마다 평균 대상 채널이
+    # 달라져 상류의 결측 마스크 통일이 무의미해짐
+    values = df[columns]
+    series = values.mean(axis=1).where(values.notna().all(axis=1))
+    frame = pd.DataFrame({SYNC_SERIES_COLUMN: series.values})
+    if "timestamp" in df.columns:
+        frame.insert(0, "timestamp", df["timestamp"].values)
+    return frame
+
+
+def _correlate_pair(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    column: str,
+    params: ScoreParams,
+) -> tuple[float | None, int]:
+    """지정 열의 두 시계열을 정렬해 상관과 유효 쌍 수를 반환함"""
     analyzer = MindSignalAnalyzer()
-
-    # trimming 적용 — 진정 구간 제외한 유효 구간만 사용함
-    trimmed1, _ = trim_dataframe(df1)
-    trimmed2, _ = trim_dataframe(df2)
-
-    aligned = align_on_second(trimmed1, trimmed2, "alpha")
+    aligned = align_on_second(df1, df2, column)
 
     if aligned is None:
         # timestamp 부재 시 구 위치 정렬로 폴백함 (합성 픽스처 호환)
         logger.warning("timestamp 컬럼 부재로 위치 기반 정렬 폴백함")
-        min_len = min(len(trimmed1), len(trimmed2))
-        if min_len < 10:
-            return None
-        alpha1 = trimmed1["alpha"].values[:min_len]
-        alpha2 = trimmed2["alpha"].values[:min_len]
-        return float(analyzer.calculate_synchrony(alpha1, alpha2))
+        min_len = min(len(df1), len(df2))
+        if min_len < params.min_synchrony_pairs:
+            return None, min_len
+        series1 = df1[column].values[:min_len]
+        series2 = df2[column].values[:min_len]
+        n_pairs = min_len
+    else:
+        if len(aligned) < params.min_synchrony_pairs:
+            return None, len(aligned)
+        series1 = aligned[f"{column}_1"].values
+        series2 = aligned[f"{column}_2"].values
+        n_pairs = len(aligned)
 
-    if len(aligned) < 10:
-        return None
+    rho = analyzer.calculate_synchrony(series1, series2, method=params.corr_method)
+    # 한쪽이 상수면 상관이 nan임. 그대로 흘리면 응답 직렬화에서 터지므로
+    # 미측정으로 낮춤(_finite_mask 주석의 Inf 사례와 같은 계열)
+    if rho is None or not np.isfinite(rho):
+        return None, n_pairs
+    return float(rho), n_pairs
 
-    return float(
-        analyzer.calculate_synchrony(
-            aligned["alpha_1"].values, aligned["alpha_2"].values
+
+def compute_synchrony(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    params: ScoreParams | None = None,
+) -> tuple[float | None, dict]:
+    """두 피실험자 간 뇌파 동조율을 계산함 (trimming 적용).
+
+    각 피실험자의 진정 구간을 먼저 제거한 뒤 공통 절대시각 구간만 비교함.
+    측정 시작 시각이 어긋나도(2026-07-10 라이브: 38.3초 차이) 같은 시각끼리
+    맞대므로 시차가 상관에 섞이지 않음.
+
+    입력은 반드시 원본 CSV DataFrame임. average_by_timestamp를 거친 쪽은
+    band_cols만 남아 채널별 열이 사라짐.
+
+    Returns:
+        (동조율 또는 None, 메타 dict) 튜플 반환. 메타에는 사용한 열들과 유효 쌍
+        수, 상관 방식, 그리고 공간평균 기준 병기값(sync_secondary)이 담김
+    """
+    resolved = _resolve_params(params)
+
+    # trimming 적용 — 진정 구간 제외한 유효 구간만 사용함
+    trimmed1, _ = trim_dataframe(df1, resolved)
+    trimmed2, _ = trim_dataframe(df2, resolved)
+
+    meta: dict = {
+        "corr_method": resolved.corr_method,
+        "sync_columns_used": [],
+        "n_pairs": 0,
+        "sync_secondary": None,
+    }
+
+    columns = resolve_sync_columns(trimmed1, trimmed2, resolved)
+    if not columns:
+        logger.warning(
+            "동조 대상 열 부재함. 후보 %s 또는 %s",
+            resolved.channel_columns,
+            resolved.spatial_column,
         )
+        return None, meta
+
+    rho, n_pairs = _correlate_pair(
+        _sync_series(trimmed1, columns),
+        _sync_series(trimmed2, columns),
+        SYNC_SERIES_COLUMN,
+        resolved,
     )
+    meta["sync_columns_used"] = columns
+    meta["n_pairs"] = n_pairs
+
+    # 공간평균 기준값 병기함. 점수에는 쓰지 않되, 감마가 근전도로 오염됐을 때
+    # "정본 준수와 강건성 중 무엇이 문제였나"를 사후에 판별할 유일한 수단임
+    # (docs/research/friendship-score-validity-threats.md 2절 권고)
+    spatial = resolved.spatial_column
+    if (
+        columns != [spatial]
+        and spatial in trimmed1.columns
+        and spatial in trimmed2.columns
+    ):
+        secondary, _ = _correlate_pair(trimmed1, trimmed2, spatial, resolved)
+        meta["sync_secondary"] = secondary
+
+    return rho, meta
 
 
 def compute_session_analysis(group_id: str, subject_indices: list[int]) -> dict:
@@ -240,84 +386,13 @@ def compute_session_analysis(group_id: str, subject_indices: list[int]) -> dict:
     synchrony_score = None
     if len(dataframes) == 2:
         keys = list(dataframes.keys())
-        synchrony_score = compute_synchrony(dataframes[keys[0]], dataframes[keys[1]])
+        synchrony_score, _ = compute_synchrony(dataframes[keys[0]], dataframes[keys[1]])
 
     return {
         "group_id": group_id,
         "subjects": subjects,
         "synchrony_score": synchrony_score,
         "dataframes": dataframes,  # Markdown 변환용 (응답에서는 제외됨)
-    }
-
-
-# ──────────────────────────────────────────────
-# SEQUENTIAL 모드 파이프라인
-# ──────────────────────────────────────────────
-
-
-def analyze_pipeline_sequential(
-    group_id: str,
-    subject_indices: list[int],
-    algorithm: str = "default",
-) -> dict:
-    """SEQUENTIAL 모드 분석 파이프라인을 실행함.
-
-    두 피실험자를 시분할로 측정한 CSV를 로드하여 반응 유사도를 계산함.
-    FAA는 raw EEG 채널 배열이 필요하므로 초기 버전에서는 None으로 처리함 (RR3).
-    pair_features / y_score / synchrony_score는 DUAL 전용이므로 None 반환함.
-
-    Args:
-        group_id: 그룹 식별자
-        subject_indices: 정확히 2명의 피실험자 인덱스 목록 (예: [1, 2], [3, 4])
-        algorithm: 유사도 알고리즘 식별자
-
-    Raises:
-        ValueError: subject_indices가 정확히 2개가 아닌 경우
-    """
-    # 입력 검증 — SEQUENTIAL 모드는 정확히 2명 필요함
-    if len(subject_indices) != 2:
-        raise ValueError(
-            f"SEQUENTIAL mode requires exactly 2 subject_indices, "
-            f"got {len(subject_indices)}"
-        )
-
-    idx_a, idx_b = subject_indices[0], subject_indices[1]
-
-    # 1. Subject A CSV 로드 수행함
-    csv_files_a = find_csv_files(group_id, subject_index=idx_a)
-    if not csv_files_a:
-        raise ValueError(f"group_id={group_id} subject_index={idx_a} CSV 미발견")
-    df_a = load_session_data(csv_files_a[0])
-
-    # 2. Subject B CSV 로드 수행함
-    csv_files_b = find_csv_files(group_id, subject_index=idx_b)
-    if not csv_files_b:
-        raise ValueError(f"group_id={group_id} subject_index={idx_b} CSV 미발견")
-    df_b = load_session_data(csv_files_b[0])
-
-    # 3. compute_subject_summary로 waves_mean 확보함 (N2: run_full_pipeline 대신)
-    summary_a = compute_subject_summary(df_a)
-    summary_b = compute_subject_summary(df_b)
-
-    # 4. Scalar 기반 input contract 구성함 (I6: faa_mean=None 초기 처리)
-    a_data = {"waves_mean": summary_a["waves_mean"], "faa_mean": None}
-    b_data = {"waves_mean": summary_b["waves_mean"], "faa_mean": None}
-
-    # 5. Strategy 호출하여 유사도 계산 수행함
-    from server.services.similarity import compute as compute_similarity
-
-    similarity_features = compute_similarity(a_data, b_data, algorithm=algorithm)
-
-    return {
-        "group_id": group_id,
-        "subjects": [
-            {"subject_index": idx_a, **summary_a},
-            {"subject_index": idx_b, **summary_b},
-        ],
-        "similarity_features": similarity_features,
-        "pair_features": None,  # DUAL 전용 필드
-        "y_score": None,  # DUAL 전용 필드
-        "synchrony_score": None,  # DUAL 전용 필드 (ADR-14-004)
     }
 
 
@@ -556,6 +631,7 @@ def run_full_pipeline(
     baseline_duration_sec: int = 30,
     band_cols: list[str] | None = None,
     satisfaction_scores: dict[int, float] | None = None,
+    params: ScoreParams | None = None,
 ) -> dict:
     """알고리즘 명세의 전체 파이프라인을 실행함
 
@@ -605,6 +681,9 @@ def run_full_pipeline(
             "pair_features": None,
             "y_score": None,
             "synchrony_score": None,
+            "friendship_score": None,
+            "score_params": _resolve_params(params).to_dict(),
+            "score_meta": {**_EMPTY_SCORE_META, "sync_reason": "no_usable_csv"},
             "pipeline_params": {
                 "stimulus_duration_sec": stimulus_duration_sec,
                 "window_size_sec": window_size_sec,
@@ -697,13 +776,24 @@ def run_full_pipeline(
         if idx_a in satisfaction_scores and idx_b in satisfaction_scores:
             y_score = compute_y(satisfaction_scores[idx_a], satisfaction_scores[idx_b])
 
-    # 기존 compute_synchrony를 활용한 synchrony_score 계산 수행함
+    # 동조율과 Friendship Score 산출함. 입력은 반드시 raw_dataframes임 —
+    # normalized 쪽은 band_cols만 남아 채널별 열(T7_gamma 등)이 사라짐.
+    # 대상은 feature 산출에 성공한 subject로 한정함 — 계약 위반으로 분석에서
+    # 빠진 subject의 원본으로 점수를 내면 pair_features는 None인데 점수만
+    # 나오는 상태가 됨(판정 기준을 pair_features와 통일함)
+    score_params = _resolve_params(params)
     synchrony_score = None
-    if len(raw_dataframes) == 2:
-        keys = list(raw_dataframes.keys())
-        synchrony_score = compute_synchrony(
-            raw_dataframes[keys[0]], raw_dataframes[keys[1]]
+    sync_meta: dict = {"sync_reason": "insufficient_subjects"}
+    usable = [idx for idx in subject_indices if idx in subject_features]
+    if len(usable) == 2:
+        synchrony_score, sync_meta = compute_synchrony(
+            raw_dataframes[usable[0]], raw_dataframes[usable[1]], score_params
         )
+
+    # 1단계는 FAA 회피율이 없으므로 avoidance_rate=None임 (2단계에서 연결)
+    friendship_score, score_meta = compute_friendship_score(
+        synchrony_score, None, score_params
+    )
 
     return {
         "group_id": group_id,
@@ -711,6 +801,12 @@ def run_full_pipeline(
         "pair_features": pair_features,
         "y_score": y_score,
         "synchrony_score": synchrony_score,
+        "friendship_score": friendship_score,
+        # 설정 원장과 산출 메타를 섞지 않음. 섞으면 경로마다 키 집합이 달라져
+        # 하류가 키 존재를 가정할 수 없고, corr_method처럼 양쪽에 있는 키가
+        # 조용히 덮어써짐. score_params는 항상 같은 키를 낸다
+        "score_params": score_params.to_dict(),
+        "score_meta": {**_EMPTY_SCORE_META, **sync_meta, **score_meta},
         "pipeline_params": {
             "stimulus_duration_sec": stimulus_duration_sec,
             "window_size_sec": window_size_sec,

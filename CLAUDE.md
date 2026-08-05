@@ -4,3 +4,4 @@
 @.agents/rules/redis-contract.md
 @.agents/rules/troubleshooting.md
 @.agents/rules/verification-loop.md
+@.agents/rules/analysis-contract.md

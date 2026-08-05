@@ -138,8 +138,8 @@ mind-signal-data-engine/
 ├── server/                  # FastAPI 독립 서버
 │   ├── app.py               # FastAPI 앱 + lifespan (ngrok + webhook 자동 등록)
 │   ├── config.py            # pydantic-settings 환경변수
-│   ├── routes/              # analyze, health, export 라우트
-│   └── services/            # analysis, markdown, webhook 서비스
+│   ├── routes/              # analyze, health, export, stream, control, logs 라우트
+│   └── services/            # analysis, markdown, webhook, friendship, score_params 등 서비스
 ├── sdk/                     # ⚠️ 수정 금지 (Emotiv 제공 원본)
 │   ├── cortex.py            # 핵심 통신 라이브러리
 │   ├── marker.py            # 마커 로직 참고용
@@ -147,8 +147,11 @@ mind-signal-data-engine/
 │   └── sub_data.py          # 데이터 구독 참고용
 ├── tests/                   # pytest 단위 테스트
 ├── scripts/                 # 진단 · E2E 스크립트 (BLE 테스트 등)
-├── certificates/            # Emotiv 연결용 SSL 인증서
-├── base44/                  # (참고 자료)
+├── certificates/            # Emotiv 연결용 SSL 인증서 (Git 추적 제외, 신규 머신마다 수동 배치 필요)
+├── docs/                    # 레포 로컬 보조 문서
+├── .agents/rules/           # AGENTS.md 본문의 상세 확장 (코드 스타일, 커밋, Redis/분석 계약, 트러블슈팅 등)
+├── AGENTS.md                # 에이전트 공통 지시 (정본)
+├── CLAUDE.md                # AGENTS.md + .agents/rules import
 ├── .env.example             # 환경 변수 가이드 (Git 추적)
 ├── .env.local               # CLIENT_ID, CLIENT_SECRET 등 (Git 추적 제외)
 ├── .flake8                  # PEP8 검사 설정 (sdk/ 제외)
