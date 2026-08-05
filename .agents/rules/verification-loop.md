@@ -1,29 +1,29 @@
 # Verification Loop Rules — Mind Signal Data Engine (Python)
 
-## 4-단계 파이프라인
+## 4-step pipeline
 
-GitHub Actions CI는 현재 이 레포에 없음. CodeRabbit AI 리뷰만 PR에 자동 연결되므로 아래 4단계를 **커밋 전 수동으로** 실행함.
+No GitHub Actions CI exists in this repo yet; only CodeRabbit AI review runs on PRs. Run these four steps by hand before every commit.
 
 ```bash
 conda activate mind-signal
-black .               # 포맷 자동 수정
-isort .               # import 정렬 자동 수정
-flake8 .              # PEP8 린트 (sdk/ 제외)
-pytest                # 단위 테스트 (tests/ 디렉토리)
+black .               # auto-fixes formatting
+isort .               # auto-fixes import order
+flake8 .              # PEP8 lint (sdk/ excluded)
+pytest                # unit tests (tests/)
 ```
 
-**순서 중요**: black → isort → flake8 → pytest. 한 단계라도 실패 시 수정 후 재실행, 전부 통과한 뒤에만 커밋·push함.
+Order matters: black -> isort -> flake8 -> pytest. Fix and re-run on any failure; only commit and push once all four pass.
 
-## Conda 환경 전제
+## Conda environment precondition
 
-`conda activate mind-signal`이 먼저임. 시스템 Python으로 실행하면 의존성 깨짐. conda 환경 Python 경로: `C:\Users\gs071\.conda\envs\mind-signal\python.exe`.
+`conda activate mind-signal` first, always. Running with system Python breaks dependencies. Verify with `python --version` after activating rather than assuming the shell already has the right interpreter.
 
-## sdk/ 폴더 수정 금지
+## sdk/ — do not modify
 
-`sdk/`는 Emotiv 제공 원본 코드라 수정 금지. `.flake8`에서도 무시 대상으로 등록됨. 수정 PR 발견 시 즉시 revert.
+`sdk/` is vendored from Emotiv — never modify it. Also excluded in `.flake8`. A PR touching it gets reverted on sight.
 
-## Agent 자기 검증 규칙
+## Agent self-verification rules
 
-1. 4단계 전체 통과 전까지 작업 완료 선언 금지.
-2. 실패 시 근본 원인 수정 — `# noqa`/`# flake8: noqa` 인용 근거 없이 추가 금지.
-3. 동일 단계 3회 연속 실패 시 사람에게 에스컬레이션.
+1. Do not declare work complete until all four steps pass.
+2. Fix the root cause on failure — do not add `# noqa` / `# flake8: noqa` without a cited reason.
+3. Escalate to a human after three consecutive failures on the same step.

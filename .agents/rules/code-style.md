@@ -1,40 +1,42 @@
 # Code Style Rules — Mind Signal Data Engine (Python)
 
-## 환경
+## Environment
 
-- Python 3.10, Conda 가상환경 `mind-signal`
-- conda 환경 Python 경로: `C:\Users\gs071\.conda\envs\mind-signal\python.exe`
-- 시스템 Python(3.13/3.9)으로 실행 금지 — 의존성 깨짐
+- Python 3.10, conda env `mind-signal`.
+- Confirm the right interpreter is active with `conda activate mind-signal && python --version` before running anything — don't hardcode a machine-specific interpreter path, everyone's conda install lives somewhere different.
+- Never run with system Python (3.13/3.9) — dependencies break.
 
-## 포맷터 / 린터
+## Formatter / linter
 
-- 포맷터: `black .` (라인 길이 88, PEP8 호환)
-- import 정렬: `isort .` (black 호환 프로파일)
-- 린터: `flake8 .` (`sdk/` 제외, `.flake8` 설정 따름)
+- Formatter: `black .` (line length 88, PEP8-compatible)
+- Import sort: `isort .` (black-compatible profile)
+- Linter: `flake8 .` (`sdk/` excluded, per `.flake8`)
 
-## 주석 — Google Style Docstring + 한국어 명사형 종결
+## Comments — Google-style docstrings + Korean noun-form endings
 
-- public 함수/클래스에는 Google Style Docstring (Args/Returns/Raises 섹션)
-- inline/block 주석은 명사형으로 종결:
-  - 허용 종결: `~함`, `~사용`, `~완료`, `~임`, `~반환`, `~생성`, `~처리`
+This is a deliberate team convention and stays in Korean regardless of the language the rest of the docs are written in.
+
+- Public functions/classes: Google-style docstring (Args/Returns/Raises sections).
+- Inline/block comments end in noun form:
+  - Allowed endings: `~함`, `~사용`, `~완료`, `~임`, `~반환`, `~생성`, `~처리`.
   - ✅ `# EEG 데이터 Redis로 전송함`
   - ✅ `# 환경변수 로드 완료`
   - ❌ `# EEG 데이터를 Redis로 전송합니다`
   - ❌ `# 환경변수를 로드하는 함수`
 
-## sdk/ 폴더 — 수정 금지
+## sdk/ — do not modify
 
-`sdk/`는 Emotiv 제공 원본 코드라 수정 금지. `.flake8`에서도 무시 대상으로 등록. PR에서 sdk/ 수정 발견 시 즉시 revert.
+`sdk/` is vendored from Emotiv — never modify it. Also excluded in `.flake8`. A PR touching `sdk/` gets reverted on sight.
 
-## 네이밍
+## Naming
 
-- 모듈/함수/변수: `snake_case`
-- 클래스: `PascalCase`
-- 상수(모듈 레벨, 진짜 불변): `SCREAMING_SNAKE_CASE`
-- 파일: `snake_case.py`
+- Modules/functions/variables: `snake_case`
+- Classes: `PascalCase`
+- Constants (module-level, actually immutable): `SCREAMING_SNAKE_CASE`
+- Files: `snake_case.py`
 
-## Type Hints
+## Type hints
 
-- public 함수 시그니처에 type hint 의무
-- `typing.Optional[X]` 대신 Python 3.10 union `X | None` 사용
-- DataFrame/ndarray는 `pandas.DataFrame` / `numpy.ndarray` 명시
+- Mandatory on public function signatures.
+- Use the Python 3.10 union `X | None`, not `typing.Optional[X]`.
+- Spell out `pandas.DataFrame` / `numpy.ndarray` explicitly rather than leaving them untyped.
