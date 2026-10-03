@@ -151,7 +151,6 @@ mind-signal-data-engine/
 ├── docs/                    # 레포 로컬 보조 문서
 ├── .agents/rules/           # AGENTS.md 본문의 상세 확장 (코드 스타일, 커밋, Redis/분석 계약, 트러블슈팅 등)
 ├── AGENTS.md                # 에이전트 공통 지시 (정본)
-├── CLAUDE.md                # AGENTS.md + .agents/rules import
 ├── .env.example             # 환경 변수 가이드 (Git 추적)
 ├── .env.local               # CLIENT_ID, CLIENT_SECRET 등 (Git 추적 제외)
 ├── .flake8                  # PEP8 검사 설정 (sdk/ 제외)
