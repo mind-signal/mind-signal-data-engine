@@ -1,6 +1,6 @@
 # AGENTS.md — Mind Signal Data Engine (Python)
 
-모든 에이전트(Claude Code / Codex CLI / 기타 모델)가 이 프로젝트에서 작업할 때 반드시 읽어야 할 공통 지시. Claude 전용 메타는 `CLAUDE.md` 참조.
+모든 에이전트(Claude Code / Codex CLI / 기타 모델)가 이 프로젝트에서 작업할 때 반드시 읽어야 할 공통 지시. 세부 규칙은 `.agents/rules/`의 code-style.md, commit-conventions.md, redis-contract.md, troubleshooting.md, verification-loop.md, analysis-contract.md이며 작업 전에 직접 연다.
 
 > 본 문서는 자가완결 — 이 레포 클론만으로 개발·검증·커밋이 가능해야 함. 상세는 `.agents/rules/*.md` 참조 (단방향: 본문이 1차 소스). 예외: 아래 "계획 산출물 위치" 절의 `.plans/` 정본 파일들은 상위 워크스페이스(`Team-project/mind-signal/.plans/`)에 있는 팀 작업 맥락 참조용이라 이 레포 클론에는 없을 수 있음 — 판단에 필요한 요지는 그 절 본문에 남겨둠.
 
