@@ -18,7 +18,10 @@ BACKEND_DUAL_URL = f"{settings.backend_url}/api/engine/register-dual"
 @pytest.mark.asyncio
 async def test_start_heartbeat_dual_calls_register_to_backend_dual(httpx_mock):
     """heartbeat 한 tick 후 register_to_backend_dual 호출 확인함"""
-    httpx_mock.add_response(url=BACKEND_DUAL_URL, method="POST", status_code=200)
+    # 대기 시간 안에 tick이 2회 이상 발생하므로 응답을 재사용 가능하게 등록함
+    httpx_mock.add_response(
+        url=BACKEND_DUAL_URL, method="POST", status_code=200, is_reusable=True
+    )
 
     # HEARTBEAT_INTERVAL_SEC을 0.05s로 monkeypatch — 1 tick 빠르게 트리거함
     with patch.object(webhook, "HEARTBEAT_INTERVAL_SEC", 0.05):
