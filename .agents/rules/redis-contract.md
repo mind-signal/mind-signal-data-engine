@@ -76,7 +76,7 @@ The backend normalizes `status` — it keeps `disconnected` as-is and folds the 
 
 With `memory` the streamer never calls `redis.from_url` and nothing is published on the channel above:
 
-- Samples go to the proxy only (`POST {PROXY_URL}/ingest/sample`, unchanged). This requires `ALIGNMENT_LOCATION=proxy` and a non-empty `PROXY_URL`; otherwise `validate_message_bus()` raises `MessageBusConfigError` before Cortex is opened and `core.main` exits 1 with the cause.
+- Samples go to the proxy only (`POST {PROXY_URL}/ingest/sample`, unchanged). This requires `ALIGNMENT_LOCATION=proxy` and a non-empty `PROXY_URL`; otherwise `validate_message_bus()` (`server/config.py`) raises `MessageBusConfigError`. The FastAPI lifespan runs it first, so the server refuses to start with the cause printed; `core.main` runs it again before Cortex is opened and exits 1.
 - `headset_status` alerts go to `POST {PROXY_URL}/status` with header `X-Engine-Secret` and body:
 
 ```json
@@ -93,7 +93,7 @@ With `memory` the streamer never calls `redis.from_url` and nothing is published
 Solo measurement (neither `DUAL_2PC_GROUP_ID` nor `DUAL_2PC_SUBJECT_INDEX` set) under `memory`:
 
 - `server/app.py` lifespan takes the 1PC legacy backend registration branch even though `ALIGNMENT_LOCATION=proxy`, because the backend refuses to start a measurement without that slot.
-- The streamer runs with `proxy_fail_closed=False`: a failed sample POST logs a warning and CSV recording continues, and the proxy `/health` monitor is not started. This matches what the `redis` solo path does when a publish fails. DUAL_2PC keeps fail-closed.
+- The streamer runs with `proxy_fail_closed=False`: the sample POST is a single attempt with a 0.5 s timeout (`SOLO_SAMPLE_POST_TIMEOUT_SEC`, applied to connect and read separately, so about 1 s worst case). On failure it logs a warning, skips sending for 5 s (`PROXY_SKIP_AFTER_FAILURE_SEC`) and keeps writing CSV rows. The proxy `/health` monitor is not started. This matches what the `redis` solo path does when a publish fails. DUAL_2PC keeps fail-closed.
 
 ## Entry point
 

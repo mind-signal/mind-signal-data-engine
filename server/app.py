@@ -7,7 +7,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from server.config import settings
+from server.config import MessageBusConfigError, settings, validate_message_bus
 from server.routes import analyze, control, export, health, logs, stream
 from server.services import logbuffer
 from server.services.analysis import AnalysisContractError
@@ -108,6 +108,17 @@ async def lifespan(app: FastAPI):
     ALIGNMENT_LOCATION=proxy 여도 분기 3 을 탐. 샘플은 프록시로 가지만 BE 는
     legacy slot 등록이 없으면 측정 시작을 거부하기 때문임
     """
+    # MESSAGE_BUS 조합 검사함. 측정 자식(core.main)만 검사하면 서버는 BE 등록과
+    # 측정 시작 응답까지 성공한 뒤 자식만 종료 코드 1로 끝나 원인이 가려짐.
+    # redis(기본)는 즉시 통과하므로 기존 기동에 영향 없음
+    try:
+        validate_message_bus(
+            settings.message_bus, settings.alignment_location, settings.proxy_url
+        )
+    except MessageBusConfigError as e:
+        print(f"[ERROR] {e}")
+        raise SystemExit(1)
+
     # Preflight soft-check: placeholder secret 감지 시 WARNING만 출력함 (Phase 17.5.1)
     if settings.engine_secret_key in PLACEHOLDER_SECRETS:
         print(

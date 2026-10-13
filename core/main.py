@@ -4,7 +4,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from core.streamer import MessageBusConfigError, MindSignalStreamer
+from core.streamer import MindSignalStreamer
+from server.config import MessageBusConfigError
 
 # 환경 변수 로드 수행함
 load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")

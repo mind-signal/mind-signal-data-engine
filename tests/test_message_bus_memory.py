@@ -7,7 +7,9 @@ Redis 없이 샘플과 헤드셋 상태 경보를 프록시로 보내는 경로�
 
 import importlib
 import json
+import socket
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -18,14 +20,9 @@ from pytest_httpx import HTTPXMock
 
 import core.main as main_module
 import core.streamer as streamer_module
-from core.streamer import (
-    MessageBusConfigError,
-    MindSignalStreamer,
-    StreamContinuityTracker,
-    validate_message_bus,
-)
+from core.streamer import MindSignalStreamer, StreamContinuityTracker
 from sdk.cortex import Cortex
-from server.config import settings
+from server.config import MessageBusConfigError, settings, validate_message_bus
 from server.services import proxy_client
 from server.services.proxy_client import ProxyForwardError
 
@@ -345,13 +342,94 @@ def test_solo_memory_proxy_failure_keeps_measuring(monkeypatch, caplog) -> None:
 
 def test_dual_memory_proxy_failure_still_fails_closed(monkeypatch) -> None:
     """대조군 — DUAL_2PC(기본 proxy_fail_closed=True)의 중단 동작은 그대로임."""
-    monkeypatch.setattr(streamer_module, "post_sample", _failing_post_sample)
+    seen: list[dict] = []
+
+    def failing(**kwargs):
+        seen.append(kwargs)
+        raise ProxyForwardError("proxy 전송 retry 소진")
+
+    monkeypatch.setattr(streamer_module, "post_sample", failing)
     s = _memory_streamer(proxy_fail_closed=True)
+    s.max_proxy_post_retries = 2
 
     _feed_one_block(s, monkeypatch, [])
 
     assert s._fail_closed_triggered is True
     assert s._closed_calls == ["close_session", "close"]
+    # fail-closed 경로의 재시도 횟수와 시간 제한은 기존 그대로임
+    assert seen[0]["max_retries"] == 2
+    assert "timeout" not in seen[0]
+
+
+def test_solo_memory_sends_once_with_short_timeout(monkeypatch) -> None:
+    seen: list[dict] = []
+    monkeypatch.setattr(streamer_module, "post_sample", lambda **kw: seen.append(kw))
+    s = _memory_streamer(proxy_fail_closed=False)
+    s.max_proxy_post_retries = 2
+
+    _feed_one_block(s, monkeypatch, [])
+
+    assert seen[0]["max_retries"] == 0
+    assert seen[0]["timeout"] == streamer_module.SOLO_SAMPLE_POST_TIMEOUT_SEC
+    assert streamer_module.SOLO_SAMPLE_POST_TIMEOUT_SEC <= 1.0
+
+
+def test_solo_memory_slow_proxy_does_not_stall_csv(monkeypatch) -> None:
+    """응답 없는 프록시가 블록 하나를 붙잡는 시간이 한도 안이고, 그 뒤 건너뜀.
+
+    연결은 받되 응답하지 않는 소켓으로 실제 httpx 시간 제한을 태움. 수정 전에는
+    10초 x 3회라 블록당 약 30초였음.
+    """
+    injected_timeout = 0.1
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    calls: list[dict] = []
+    real_post_sample = proxy_client.post_sample
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        real_post_sample(**kwargs)
+
+    monkeypatch.setattr(streamer_module, "post_sample", spy)
+    s = _memory_streamer(proxy_fail_closed=False)
+    s.proxy_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    s.solo_sample_post_timeout_sec = injected_timeout
+    rows: list = []
+
+    try:
+        started = time.monotonic()
+        _feed_one_block(s, monkeypatch, rows)
+        first_block_sec = time.monotonic() - started
+
+        started = time.monotonic()
+        for _ in range(3):
+            _feed_one_block(s, monkeypatch, rows)
+        skipped_blocks_sec = time.monotonic() - started
+    finally:
+        proxy_client.close_shared_client()
+        listener.close()
+
+    # 한도는 연결과 읽기 합산 약 2배에 블록 계산 여유를 더한 값임
+    assert injected_timeout <= first_block_sec < injected_timeout * 2 + 1.0
+    assert len(calls) == 1, "건너뛰는 구간에서 전송을 시도하면 안 됨"
+    assert skipped_blocks_sec < 1.0
+    assert len(rows) == 4
+    assert s._closed_calls == []
+
+
+def test_solo_memory_resumes_sending_after_skip_window(monkeypatch) -> None:
+    monkeypatch.setattr(streamer_module, "post_sample", _failing_post_sample)
+    s = _memory_streamer(proxy_fail_closed=False)
+    _feed_one_block(s, monkeypatch, [])
+    assert s._proxy_skip_until > time.monotonic()
+
+    seen: list[dict] = []
+    monkeypatch.setattr(streamer_module, "post_sample", lambda **kw: seen.append(kw))
+    s._proxy_skip_until = time.monotonic() - 0.001
+    _feed_one_block(s, monkeypatch, [])
+
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize(
@@ -481,6 +559,36 @@ async def test_lifespan_dual_memory_keeps_proxy_registration(monkeypatch) -> Non
     mocks["register_to_proxy"].assert_awaited_once()
     mocks["register_to_backend"].assert_not_awaited()
     assert mocks["heartbeat_task_created"] is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"alignment_location": "be"}, "ALIGNMENT_LOCATION=proxy"),
+        ({"proxy_url": None}, "PROXY_URL"),
+        ({"message_bus": "kafka"}, "MESSAGE_BUS='kafka'"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_lifespan_refuses_to_start_on_bad_memory_config(
+    monkeypatch, capsys, overrides, expected
+) -> None:
+    """잘못된 조합이면 등록 전에 서버 기동을 멈추고 원인을 출력함."""
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_lifespan_with(monkeypatch, **overrides)
+
+    assert exc_info.value.code == 1
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_lifespan_redis_bus_starts_without_proxy_settings(monkeypatch) -> None:
+    """대조군 — 기본 버스는 프록시 설정이 없어도 기존대로 기동하고 등록함."""
+    mocks = await _run_lifespan_with(
+        monkeypatch, message_bus="redis", alignment_location="be", proxy_url=None
+    )
+
+    mocks["register_to_backend"].assert_awaited_once()
 
 
 @pytest.mark.asyncio

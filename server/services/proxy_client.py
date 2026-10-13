@@ -155,6 +155,7 @@ def post_sample(
     metrics: dict | None = None,
     max_retries: int = 2,
     backoffs_sec: tuple[float, ...] = (0.1, 0.2),
+    timeout: float | None = None,
 ) -> None:
     """DE 샘플 데이터를 proxy /ingest/sample 엔드포인트로 포워딩함.
 
@@ -171,6 +172,8 @@ def post_sample(
             오표시하던 결함이 재발하므로 라이브 경로에서는 항상 전달함.
         max_retries: 재시도 최대 횟수 (총 시도 = 1 + max_retries).
         backoffs_sec: 각 retry 전 대기 시간 (초) 순서 튜플.
+        timeout: 이 호출의 HTTP 시간 제한(초). None이면 공용 Client 기본값을 씀.
+            연결과 읽기에 각각 적용되므로 둘을 합친 최악은 약 2배임.
 
     Raises:
         ProxyForwardError: max_retries 소진 후 최종 실패 시 raise됨.
@@ -189,6 +192,9 @@ def post_sample(
     }
     if metrics is not None:
         body["metrics"] = metrics
+
+    # None이면 인자를 아예 넘기지 않아 기존 호출의 시간 제한을 그대로 둠
+    request_kwargs = {} if timeout is None else {"timeout": timeout}
 
     last_exc: Exception | None = None
 
@@ -214,6 +220,7 @@ def post_sample(
                     "Content-Type": "application/json",
                 },
                 json=body,
+                **request_kwargs,
             )
             # 4xx/5xx 응답 시 HTTPStatusError raise함
             response.raise_for_status()
