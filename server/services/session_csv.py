@@ -23,6 +23,16 @@ WAVE_COLUMNS: tuple[str, ...] = ("delta", "theta", "alpha", "beta", "gamma")
 def session_csv_pattern(
     group_id: str, subject_index: int, *, escape_group_id: bool = False
 ) -> str:
-    """세션 CSV 파일 이름의 glob 패턴을 반환함 (폴더 경로는 포함하지 않음)"""
+    """세션 CSV 파일 이름의 glob 패턴을 반환함 (폴더 경로는 포함하지 않음)
+
+    Args:
+        group_id: 실험 그룹 ID
+        subject_index: 피실험자 순번
+        escape_group_id: 참이면 group_id의 glob 메타문자를 이스케이프함.
+            기본값은 거짓이며 group_id를 그대로 넣음
+
+    Returns:
+        `subject_{subject_index}_{group_id}_*.csv` 형태의 패턴 문자열
+    """
     gid = glob.escape(group_id) if escape_group_id else group_id
     return f"subject_{subject_index}_{gid}_*.csv"
