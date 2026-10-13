@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env.local"
         env_file_encoding = "utf-8"
+        # 빈 값(`DUAL_2PC_SUBJECT_INDEX=`)을 미설정으로 취급함. core/main.py와 같은
+        # 해석이며, 없으면 int | None 검증 오류로 서버가 1인 memory 분기에 못 감
+        env_ignore_empty = True
         extra = "ignore"  # .env.local의 미정의 변수 무시함
 
 

@@ -599,3 +599,16 @@ async def test_lifespan_solo_redis_proxy_mode_unchanged(monkeypatch) -> None:
     mocks["register_to_backend"].assert_not_awaited()
     mocks["register_to_proxy"].assert_not_awaited()
     assert mocks["heartbeat_task_created"] is False
+
+
+def test_empty_dual_2pc_env_is_treated_as_unset(monkeypatch):
+    """.env.example처럼 값이 빈 DUAL_2PC 항목이 서버 설정 로드를 막지 않아야 함."""
+    from server.config import Settings
+
+    monkeypatch.setenv("DUAL_2PC_SUBJECT_INDEX", "")
+    monkeypatch.setenv("DUAL_2PC_GROUP_ID", "")
+
+    loaded = Settings(_env_file=None)
+
+    assert loaded.dual_2pc_subject_index is None
+    assert loaded.dual_2pc_group_id is None
