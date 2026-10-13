@@ -84,7 +84,17 @@ pytest        # 단위 테스트 (tests/)
 
 1 task = 1 commit. `main` 직접 커밋 금지 — 작업 브랜치를 만들어 `dev`로 PR, 이후 `dev`를 `main`으로 PR.
 
-브랜치 이름: 작업이 등록된 Work의 범위와 완료 조건에 들어가면 유형과 관계없이 `{type}/{work-id}-{slug}`를 쓴다. `{work-id}`는 Work ID 전체를 소문자로 바꾼 값이다. Work ID의 뜻은 이 문서의 「Work ID 읽는 법」에 있다. 실제 병합 이력의 예는 `feat/ops-w013-message-bus-memory`, `fix/ops-w010-t7-preflight`, `refactor/ops-w017-session-csv-store`다. Work에 속하지 않는 작업은 `{type}/{slug}` 또는 `{type}/{이슈번호}-{slug}`를 쓴다(형식 예: `fix/readme-link`, `fix/123-readme-link`). 이슈 번호 앞의 `#`은 적어도 되고 생략해도 된다(`fix/#123-readme-link`도 같은 형식이다). Work에 속한 브랜치에는 이슈 번호를 Work ID 대신 쓰지 않는다. `{slug}`는 작업 내용을 나타내는 영문 소문자, 숫자, 하이픈으로 쓰며 Work 폴더의 slug와 달라도 된다. `{type}`은 작업의 최종 목적에 맞는 커밋 유형이다. 운영 긴급 수정에는 브랜치 접두사 `hotfix`도 쓴다. `hotfix`는 `{type}` 자리에 쓰며 형식은 다른 유형과 같다(Work에 속하면 `hotfix/{work-id}-{slug}`, 속하지 않으면 `hotfix/{slug}` 또는 `hotfix/{이슈번호}-{slug}`). 계획판(`mind-signal/.plans/`)에 접근할 수 없으면 전달받은 Work ID와 작업 범위로 판단한다. Work ID를 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다. 이미 만든 브랜치는 이 규칙을 이유로 개명하지 않는다. 제품 공통 규칙의 정본은 `mind-signal/.plans/README.md`의 「브랜치 이름」 절이다.
+브랜치 이름(제품 공통 규칙. 정본은 `mind-signal/.plans/README.md`의 「브랜치 이름」 절, 상세는 `.agents/rules/commit-conventions.md`):
+
+- 작업이 등록된 Work의 범위와 완료 조건에 들어가면 유형과 관계없이 `{type}/{work-id}-{slug}`를 쓴다. `{work-id}`는 Work ID 전체의 소문자다(예: `fix/ops-w010-t7-preflight`). Work ID의 뜻은 이 문서의 「Work ID 읽는 법」에 있다.
+- Work에 속하지 않는 작업은 `{type}/{slug}` 또는 `{type}/{이슈번호}-{slug}`를 쓴다(형식 예: `fix/readme-link`, `fix/123-readme-link`). 이슈 번호 앞의 `#`은 적어도 되고 생략해도 된다.
+- Work에 속한 브랜치에는 이슈 번호를 Work ID 대신 쓰지 않는다.
+- 브랜치 하나에는 Work 하나만 담는다. 여러 Work를 구현하면 Work마다 브랜치를 나눈다.
+- 종결된 Work의 ID는 새 브랜치에 쓰지 않는다. 종결된 Work의 결과를 고치는 작업에 새 Work ID를 전달받았으면 그 ID를 쓴다. 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다.
+- `{type}`은 작업의 최종 목적에 맞는 커밋 유형이다. 운영 긴급 수정에는 `{type}` 자리에 `hotfix`도 쓰며 형식은 다른 유형과 같다.
+- `{slug}`는 영문 소문자, 숫자, 하이픈으로 쓴다.
+- 계획판(`mind-signal/.plans/`)에 접근할 수 없으면 전달받은 Work ID와 작업 범위로 판단한다. Work ID를 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다.
+- 이미 만든 브랜치는 개명하지 않는다. 브랜치를 만든 뒤 Work 소속이 바뀌면 PR 본문에 적는다.
 
 모든 커밋 끝에 아래를 고정 작성(`noreply` 금지, Claude co-author 줄 금지):
 
