@@ -70,6 +70,31 @@ Watchdog-triggered alerts (`no_data`, `metrics_stale`) include `silentSeconds` �
 
 The backend normalizes `status` — it keeps `disconnected` as-is and folds the others into `stale` (see `stream-health.service.ts` on the backend side).
 
+## `MESSAGE_BUS=memory` — no Redis
+
+`MESSAGE_BUS` selects the transport: `redis` (default, everything above) or `memory`. `core.main` reads it from the environment and passes it to the streamer like the other proxy settings.
+
+With `memory` the streamer never calls `redis.from_url` and nothing is published on the channel above:
+
+- Samples go to the proxy only (`POST {PROXY_URL}/ingest/sample`, unchanged). This requires `ALIGNMENT_LOCATION=proxy` and a non-empty `PROXY_URL`; otherwise `validate_message_bus()` raises `MessageBusConfigError` before Cortex is opened and `core.main` exits 1 with the cause.
+- `headset_status` alerts go to `POST {PROXY_URL}/status` with header `X-Engine-Secret` and body:
+
+```json
+{
+  "group_id": "<string>",
+  "subject_idx": 1,
+  "status": "no_data | metrics_stale | invalid_data | disconnected",
+  "silent_seconds": 0
+}
+```
+
+`silent_seconds` is omitted for `disconnected`, mirroring `silentSeconds` above. The proxy forwards the same four fields to the backend as Socket.io event `proxy:status`. One attempt, 2 s timeout (`STATUS_POST_TIMEOUT_SEC`), no retry; a failure is logged as a warning and never stops the measurement.
+
+Solo measurement (neither `DUAL_2PC_GROUP_ID` nor `DUAL_2PC_SUBJECT_INDEX` set) under `memory`:
+
+- `server/app.py` lifespan takes the 1PC legacy backend registration branch even though `ALIGNMENT_LOCATION=proxy`, because the backend refuses to start a measurement without that slot.
+- The streamer runs with `proxy_fail_closed=False`: a failed sample POST logs a warning and CSV recording continues, and the proxy `/health` monitor is not started. This matches what the `redis` solo path does when a publish fails. DUAL_2PC keeps fail-closed.
+
 ## Entry point
 
 Current form only: `python -m core.main <groupId> <subjectIndex>`.

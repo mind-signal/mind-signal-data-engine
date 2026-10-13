@@ -104,6 +104,9 @@ async def lifespan(app: FastAPI):
        BE 의 legacy 단일 slot 을 채우고 BTI 폴백 분석이 그 slot 을 사용함
 
     분기 1~3 은 be 모드(ALIGNMENT_LOCATION=be, 기본값) 전용임.
+    예외: MESSAGE_BUS=memory 이고 DUAL_2PC 설정이 둘 다 없으면(1인 측정)
+    ALIGNMENT_LOCATION=proxy 여도 분기 3 을 탐. 샘플은 프록시로 가지만 BE 는
+    legacy slot 등록이 없으면 측정 시작을 거부하기 때문임
     """
     # Preflight soft-check: placeholder secret 감지 시 WARNING만 출력함 (Phase 17.5.1)
     if settings.engine_secret_key in PLACEHOLDER_SECRETS:
@@ -146,7 +149,13 @@ async def lifespan(app: FastAPI):
     # Phase 18: proxy 모드 여부 판별 (ALIGNMENT_LOCATION=proxy 시 true)
     proxy_mode = settings.alignment_location == "proxy"
 
-    if proxy_mode:
+    # memory 버스의 1인 측정은 샘플 경로만 프록시이고 등록은 1PC legacy 그대로임.
+    # 프록시 등록은 DUAL_2PC_SUBJECT_INDEX 가 있어야 하므로 이 경우 대상이 아님
+    solo_memory = (
+        settings.message_bus == "memory" and not has_group_id and not has_subject_index
+    )
+
+    if proxy_mode and not solo_memory:
         # proxy 모드: BE 등록 분기 전체 skip — proxy가 subjectIndex→DE_URL 레지스트리 소유 (R1-11)
         if not settings.proxy_url:
             print(

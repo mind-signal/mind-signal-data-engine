@@ -102,6 +102,48 @@ class ProxyHealthTracker:
         return elapsed_ms >= self._threshold_ms
 
 
+def post_status(
+    proxy_url: str,
+    secret_key: str,
+    group_id: str,
+    subject_idx: int,
+    status: str,
+    silent_seconds: int | None = None,
+    timeout: float = 2.0,
+) -> None:
+    """헤드셋 상태 경보 1건을 proxy /status 엔드포인트로 전송함.
+
+    샘플과 달리 재시도하지 않음. 경보는 샘플 처리 스레드에서도 호출되므로
+    짧은 시간 제한 1회 시도로 끝내고, 실패 처리는 호출부가 맡음.
+
+    Args:
+        proxy_url: 프록시 서버 베이스 URL.
+        secret_key: X-Engine-Secret 헤더로 전달되는 공유 시크릿.
+        group_id: 세션 그룹 ID.
+        subject_idx: 피실험자 인덱스.
+        status: 상태 문자열 (no_data, metrics_stale, invalid_data, disconnected).
+        silent_seconds: 무신호 경과 초. None이면 본문에서 생략함.
+        timeout: HTTP 요청 타임아웃(초).
+
+    Raises:
+        httpx.RequestError: 연결 실패 또는 시간 초과 시 raise됨.
+        httpx.HTTPStatusError: 4xx/5xx 응답 시 raise됨.
+    """
+    body: dict = {"group_id": group_id, "subject_idx": subject_idx, "status": status}
+    if silent_seconds is not None:
+        body["silent_seconds"] = silent_seconds
+    response = get_shared_client().post(
+        f"{proxy_url}/status",
+        headers={
+            "X-Engine-Secret": secret_key,
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+
+
 def post_sample(
     proxy_url: str,
     secret_key: str,

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Proxy 연동 (engine-proxy-sync Phase 18)
     proxy_url: str | None = None  # env PROXY_URL
     alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+    # env MESSAGE_BUS — redis(기본) 또는 memory. 값 검사는 core.streamer의
+    # validate_message_bus가 측정 시작 전에 수행함. Literal로 두지 않는 이유는
+    # 오타 하나로 분석 서버 기동까지 막지 않기 위함임
+    message_bus: str = "redis"
     proxy_reregister_interval_sec: int = (
         20  # env PROXY_REREGISTER_INTERVAL_SEC — TTL 만료 전 재등록 주기(초)
     )
