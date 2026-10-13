@@ -50,4 +50,12 @@ test(analyzer): cover empty CSV edge case
 | revert | revert a prior commit |
 
 - One task = one commit.
-- Never commit directly to `main` — branch as `{type}/{domain-wNNN}-{slug}` (Work ID style, matching the product's `.plans/` Work ID scheme), PR into `dev`.
+- Never commit directly to `main` — work on a branch and PR into `dev`.
+- Branch naming (product-wide rule; canonical text: `mind-signal/.plans/README.md`, section "브랜치 이름"):
+  - If the work falls within the scope and completion criteria of a registered Work, use `{type}/{work-id}-{slug}` for any type. `{work-id}` is the full Work ID in lowercase. Examples from the merge history: `feat/ops-w013-message-bus-memory`, `fix/ops-w010-t7-preflight`, `refactor/ops-w017-session-csv-store`
+  - If the work has no Work affiliation, use `{type}/{slug}` or `{type}/{issue-number}-{slug}` (format examples: `fix/readme-link`, `fix/123-readme-link`). The `#` before the issue number is optional: `fix/#123-readme-link` is the same format.
+  - Never use an issue number in place of the Work ID on a branch that belongs to a Work; link the issue from the PR body.
+  - Use lowercase English letters, digits, and hyphens for `{slug}`. It may differ from the Work folder slug.
+  - `{type}` is the commit type that matches the final purpose of the work. `hotfix` is an extra branch prefix for urgent production fixes; it is not a commit type. It takes the place of `{type}` and follows the same formats as any other type: `hotfix/{work-id}-{slug}` for work that belongs to a Work, `hotfix/{slug}` or `hotfix/{issue-number}-{slug}` otherwise.
+  - If the product plan files (`mind-signal/.plans/`) are unavailable, decide by the Work ID and scope you were given. If no Work ID was given, use the format for work with no Work affiliation.
+  - `main` and `dev` are integration branches and keep their names; release PRs go from `dev` to `main`. Do not rename existing branches because of this rule.

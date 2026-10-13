@@ -82,7 +82,9 @@ pytest        # 단위 테스트 (tests/)
 
 형식: `{type}({scope}): {description}`. 허용 type: `feat fix refactor style docs chore test perf ci revert`.
 
-1 task = 1 commit. `main` 직접 커밋 금지 — `feat/{domain-wNNN}-{slug}`(Work ID 스타일, 예: `feat/analysis-w005-band-power-fix`)로 브랜치해 `dev`로 PR, 이후 `dev`를 `main`으로 PR.
+1 task = 1 commit. `main` 직접 커밋 금지 — 작업 브랜치를 만들어 `dev`로 PR, 이후 `dev`를 `main`으로 PR.
+
+브랜치 이름: 작업이 등록된 Work의 범위와 완료 조건에 들어가면 유형과 관계없이 `{type}/{work-id}-{slug}`를 쓴다. `{work-id}`는 Work ID 전체를 소문자로 바꾼 값이다. Work ID의 뜻은 이 문서의 「Work ID 읽는 법」에 있다. 실제 병합 이력의 예는 `feat/ops-w013-message-bus-memory`, `fix/ops-w010-t7-preflight`, `refactor/ops-w017-session-csv-store`다. Work에 속하지 않는 작업은 `{type}/{slug}` 또는 `{type}/{이슈번호}-{slug}`를 쓴다(형식 예: `fix/readme-link`, `fix/123-readme-link`). 이슈 번호 앞의 `#`은 적어도 되고 생략해도 된다(`fix/#123-readme-link`도 같은 형식이다). Work에 속한 브랜치에는 이슈 번호를 Work ID 대신 쓰지 않는다. `{slug}`는 작업 내용을 나타내는 영문 소문자, 숫자, 하이픈으로 쓰며 Work 폴더의 slug와 달라도 된다. `{type}`은 작업의 최종 목적에 맞는 커밋 유형이다. 운영 긴급 수정에는 브랜치 접두사 `hotfix`도 쓴다. `hotfix`는 `{type}` 자리에 쓰며 형식은 다른 유형과 같다(Work에 속하면 `hotfix/{work-id}-{slug}`, 속하지 않으면 `hotfix/{slug}` 또는 `hotfix/{이슈번호}-{slug}`). 계획판(`mind-signal/.plans/`)에 접근할 수 없으면 전달받은 Work ID와 작업 범위로 판단한다. Work ID를 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다. 이미 만든 브랜치는 이 규칙을 이유로 개명하지 않는다. 제품 공통 규칙의 정본은 `mind-signal/.plans/README.md`의 「브랜치 이름」 절이다.
 
 모든 커밋 끝에 아래를 고정 작성(`noreply` 금지, Claude co-author 줄 금지):
 
@@ -119,11 +121,11 @@ mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나,
 
 `Team-project/.plans/`(루트)와 혼동하지 말 것 — 그쪽은 2026-07-30 통합 이후 크로스 프로젝트 메타 전용이고, 폴더에 번호가 붙어 있어도 MindSignal 계획은 없다.
 
-판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인(`ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS`)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
+판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인 접두사(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
 
 - 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
-- ID·상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, **LOCK**)
+- ID·상태·브랜치 이름 규칙 정본: `mind-signal/.plans/README.md`
 - 소급 Work ID 매핑: `mind-signal/.plans/LEGACY-REGISTRY.md`
 - 작업 폴더: `mind-signal/.plans/{WORK-ID}[-{slug}]` (예: `ANALYSIS-W001-eeg-dc-offset-removal`)
 - 상태 서술: `mind-signal/.plans/STATE.md`
@@ -131,4 +133,4 @@ mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나,
 
 ### Work ID 읽는 법 (흔한 오독)
 
-폴더 접두사는 `{domain}-W{NNN}`이며 **도메인별로 채번**한다(`ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS`) — 전역 순번이 아니다. 신규는 W001부터, 소급은 W101부터 시작하므로 `SESSION-W114`는 전체 114번째가 아니라 소급 14번째 SESSION 항목이다. 번호는 영구적이며 재사용되지 않는다 — 공백은 오류가 아니라 역사다. `project-flow` 스킬의 범용 `{NN}-{feature-name}` 규칙은 여기 적용되지 않는다 — `.plans/README.md`의 로컬 선언이 우선한다.
+폴더 접두사는 `{domain}-W{NNN}`이며 **도메인별로 채번**한다(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리) — 전역 순번이 아니다. 신규는 W001부터, 소급은 W101부터 시작하므로 `SESSION-W114`는 전체 114번째가 아니라 소급 14번째 SESSION 항목이다. 번호는 영구적이며 재사용되지 않는다 — 공백은 오류가 아니라 역사다. `project-flow` 스킬의 범용 `{NN}-{feature-name}` 규칙은 여기 적용되지 않는다 — `.plans/README.md`의 로컬 선언이 우선한다.

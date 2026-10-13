@@ -1,6 +1,6 @@
 ---
 name: "🔧 TASK"
-about: "Team-project/.plans/에서 생성된 개발 작업 (dispatch 실행용)"
+about: "MindSignal 제품 계획에서 생성된 개발 작업 (dispatch 실행용)"
 title: ""
 labels: "task"
 assignees: ""
@@ -13,7 +13,7 @@ assignees: ""
 
 ## 관련 Phase
 - Phase: ``
-- Plan: `Team-project/.plans/{NN}-{기능명}/PLAN.md`
+- Plan: `mind-signal/.plans/{WORK-ID}[-{slug}]/PLAN.md`
 
 ## 할 일 (변경 파일 + diff 명세)
 - [ ] `src/path/file` — 신규/수정: 설명
@@ -23,7 +23,9 @@ assignees: ""
 - [ ] `npm run build` 에러 없음
 
 ## 브랜치 규칙
-- 브랜치: `feat/`
+- 브랜치: 등록된 Work에 속하면 `{타입}/{work-id}-{작업명}`, 속하지 않으면 `{타입}/{작업명}` 또는 `{타입}/{이슈번호}-{작업명}` (이슈 번호 앞의 `#`은 생략 가능)
+- `{work-id}`: Work ID 전체를 소문자로 바꾼 값
+- `{타입}`: 작업의 최종 목적에 따라 선택. 상세 기준은 `AGENTS.md`의 브랜치 규칙 참조
 - base: `dev`
 - PR 타겟: `dev`
 
