@@ -102,6 +102,48 @@ class ProxyHealthTracker:
         return elapsed_ms >= self._threshold_ms
 
 
+def post_status(
+    proxy_url: str,
+    secret_key: str,
+    group_id: str,
+    subject_idx: int,
+    status: str,
+    silent_seconds: int | None = None,
+    timeout: float = 2.0,
+) -> None:
+    """헤드셋 상태 경보 1건을 proxy /status 엔드포인트로 전송함.
+
+    샘플과 달리 재시도하지 않음. 경보는 샘플 처리 스레드에서도 호출되므로
+    짧은 시간 제한 1회 시도로 끝내고, 실패 처리는 호출부가 맡음.
+
+    Args:
+        proxy_url: 프록시 서버 베이스 URL.
+        secret_key: X-Engine-Secret 헤더로 전달되는 공유 시크릿.
+        group_id: 세션 그룹 ID.
+        subject_idx: 피실험자 인덱스.
+        status: 상태 문자열 (no_data, metrics_stale, invalid_data, disconnected).
+        silent_seconds: 무신호 경과 초. None이면 본문에서 생략함.
+        timeout: HTTP 요청 타임아웃(초).
+
+    Raises:
+        httpx.RequestError: 연결 실패 또는 시간 초과 시 raise됨.
+        httpx.HTTPStatusError: 4xx/5xx 응답 시 raise됨.
+    """
+    body: dict = {"group_id": group_id, "subject_idx": subject_idx, "status": status}
+    if silent_seconds is not None:
+        body["silent_seconds"] = silent_seconds
+    response = get_shared_client().post(
+        f"{proxy_url}/status",
+        headers={
+            "X-Engine-Secret": secret_key,
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+
+
 def post_sample(
     proxy_url: str,
     secret_key: str,
@@ -113,6 +155,7 @@ def post_sample(
     metrics: dict | None = None,
     max_retries: int = 2,
     backoffs_sec: tuple[float, ...] = (0.1, 0.2),
+    timeout: float | None = None,
 ) -> None:
     """DE 샘플 데이터를 proxy /ingest/sample 엔드포인트로 포워딩함.
 
@@ -129,6 +172,8 @@ def post_sample(
             오표시하던 결함이 재발하므로 라이브 경로에서는 항상 전달함.
         max_retries: 재시도 최대 횟수 (총 시도 = 1 + max_retries).
         backoffs_sec: 각 retry 전 대기 시간 (초) 순서 튜플.
+        timeout: 이 호출의 HTTP 시간 제한(초). None이면 공용 Client 기본값을 씀.
+            연결과 읽기에 각각 적용되므로 둘을 합친 최악은 약 2배임.
 
     Raises:
         ProxyForwardError: max_retries 소진 후 최종 실패 시 raise됨.
@@ -147,6 +192,9 @@ def post_sample(
     }
     if metrics is not None:
         body["metrics"] = metrics
+
+    # None이면 인자를 아예 넘기지 않아 기존 호출의 시간 제한을 그대로 둠
+    request_kwargs = {} if timeout is None else {"timeout": timeout}
 
     last_exc: Exception | None = None
 
@@ -172,6 +220,7 @@ def post_sample(
                     "Content-Type": "application/json",
                 },
                 json=body,
+                **request_kwargs,
             )
             # 4xx/5xx 응답 시 HTTPStatusError raise함
             response.raise_for_status()

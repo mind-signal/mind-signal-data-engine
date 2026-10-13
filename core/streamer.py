@@ -16,12 +16,13 @@ from redis.retry import Retry
 
 from core.analyzer import MindSignalAnalyzer
 from sdk.cortex import Cortex
-from server.config import settings
+from server.config import settings, validate_message_bus
 from server.services.proxy_client import (
     ProxyForwardError,
     ProxyHealthTracker,
     check_health,
     post_sample,
+    post_status,
 )
 from server.services.webhook import upload_csv_to_backend
 
@@ -58,6 +59,18 @@ CONTINUITY_ROLLUP_INTERVAL_SEC = 30
 # 매 샘플 발생 가능한 경보의 재발행 최소 간격임. BE도 같은 status 연속 수신을
 # 억제하지만(stream-health.service.ts), Redis에 초당 128건을 던질 이유가 없음.
 HEALTH_REPUBLISH_INTERVAL_SEC = 10
+# memory 버스에서 경보를 프록시로 보낼 때의 HTTP 시간 제한임. invalid_data 경보는
+# 샘플 처리 콜백 안에서 나가므로 128샘플 블록당 1초 예산을 오래 막지 않게 짧게 둠.
+# 프록시의 BE ack 대기(1초)보다는 길어야 프록시의 실패 응답을 받을 수 있음.
+STATUS_POST_TIMEOUT_SEC = 2.0
+# 1인 memory 측정(proxy_fail_closed=False)의 샘플 전송 시간 제한임. 이 경로는 전송이
+# 실패해도 측정을 계속하므로, 응답 없는 프록시가 EEG 콜백을 붙잡으면 CSV 행이
+# 통째로 빠짐(10초 x 3회면 블록당 30초). httpx는 이 값을 연결과 읽기에 각각
+# 적용하므로 0.5초면 둘을 합친 최악이 약 1초임. 재시도는 하지 않음.
+SOLO_SAMPLE_POST_TIMEOUT_SEC = 0.5
+# 1인 memory 측정에서 샘플 전송이 실패한 뒤 전송을 건너뛰는 시간임. 죽은 프록시에
+# 매 블록 시간 제한만큼 기다리지 않고 CSV 기록만 계속하기 위함임.
+PROXY_SKIP_AFTER_FAILURE_SEC = 5.0
 # Emotiv Insight의 뇌파 채널임. CSV 채널별 컬럼 순서의 정본이며, 실제 헤드셋에
 # 일부 채널이 없어도 헤더는 이 순서 그대로 고정함(스키마 안정성).
 TARGET_EEG_CHANNELS = ["AF3", "T7", "Pz", "T8", "AF4"]
@@ -275,6 +288,12 @@ class MindSignalStreamer(Cortex):
     [Engine] EEG 시계열 버퍼링 및 분석을 통해 실시간 데이터를 발행하는 스트리머임
     """
 
+    # __new__로 만든 테스트 인스턴스도 기본 버스를 갖도록 클래스 기본값으로 둠
+    message_bus = "redis"
+    proxy_fail_closed = True
+    solo_sample_post_timeout_sec = SOLO_SAMPLE_POST_TIMEOUT_SEC
+    _proxy_skip_until = 0.0
+
     def __init__(
         self,
         group_id,
@@ -287,8 +306,19 @@ class MindSignalStreamer(Cortex):
         max_proxy_post_retries: int = 2,
         proxy_health_poll_interval_sec: float = 1.0,
         proxy_fail_closed_threshold_ms: int = 3000,
+        message_bus: str = "redis",
+        proxy_fail_closed: bool = True,
+        solo_sample_post_timeout_sec: float = SOLO_SAMPLE_POST_TIMEOUT_SEC,
         **kwargs,
     ):
+        # Cortex 연결과 CSV 생성보다 먼저 검사함 (측정 시작 전 즉시 중단)
+        validate_message_bus(message_bus, alignment_location, proxy_url)
+        self.message_bus = message_bus
+        # False면 프록시 전송 실패와 /health 실패에도 측정을 계속함 (1인 memory 전용)
+        self.proxy_fail_closed = proxy_fail_closed
+        self.solo_sample_post_timeout_sec = solo_sample_post_timeout_sec
+        # 이 monotonic 시각 전까지는 1인 memory 샘플 전송을 건너뜀
+        self._proxy_skip_until = 0.0
         if headset_id:
             kwargs["headset_id"] = headset_id
         super().__init__(*args, **kwargs)
@@ -324,12 +354,16 @@ class MindSignalStreamer(Cortex):
         default_port = os.getenv("REDIS_PORT", 6379)
         fallback = f"redis://{default_host}:{default_port}/0"
         redis_url = os.getenv("REDIS_URL", fallback)
-        self.r = redis.from_url(
-            redis_url,
-            retry=Retry(ExponentialBackoff(cap=10, base=1), 25),
-            retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError],
-            health_check_interval=1,
-        )
+        if self.message_bus == "memory":
+            # memory 버스는 Redis에 연결하지 않고 클라이언트도 만들지 않음
+            self.r = None
+        else:
+            self.r = redis.from_url(
+                redis_url,
+                retry=Retry(ExponentialBackoff(cap=10, base=1), 25),
+                retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError],
+                health_check_interval=1,
+            )
 
         # 3. CSV 저장 경로 및 헤더 설정 수행함
         base_path = Path(__file__).resolve().parent.parent.parent
@@ -558,7 +592,7 @@ class MindSignalStreamer(Cortex):
         self._start_rollup_thread()
 
         # proxy 모드 시 health 폴링 데몬 시작함
-        if self.alignment_location == "proxy":
+        if self.alignment_location == "proxy" and self.proxy_fail_closed:
             self._start_proxy_health_monitor()
 
         self.sub_request(["eeg", "met"])
@@ -599,6 +633,33 @@ class MindSignalStreamer(Cortex):
         t = threading.Thread(target=_check, daemon=True)
         t.start()
 
+    def _post_status_to_proxy(
+        self, status: str, silent_seconds: int | None = None
+    ) -> None:
+        """headset_status 경보를 프록시 /status로 보냄 (memory 버스 전용).
+
+        실패는 경고 로그만 남기고 삼킴. 경보 전송 실패가 측정을 깨지 않음.
+
+        Args:
+            status - DE 상태 문자열임
+            silent_seconds - 무신호 경과 초임. None이면 본문에서 생략함
+        """
+        try:
+            post_status(
+                proxy_url=self.proxy_url,
+                secret_key=self.engine_secret_key,
+                group_id=self.group_id,
+                subject_idx=self.subject_index,
+                status=status,
+                silent_seconds=silent_seconds,
+                timeout=STATUS_POST_TIMEOUT_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001 — 경보 전송 실패가 측정을 깨지 않음
+            logger.warning(
+                f"[WATCHDOG] 상태 프록시 전송 실패 ({status}): {exc}"
+                f" (subject {self.subject_index})"
+            )
+
     def _publish_health(
         self, status: str, elapsed: float = 0, min_interval_sec: float = 0
     ) -> None:
@@ -619,6 +680,10 @@ class MindSignalStreamer(Cortex):
             if last is not None and mono - last < min_interval_sec:
                 return
             self._health_published_at[status] = mono
+
+        if self.message_bus == "memory":
+            self._post_status_to_proxy(status, round(elapsed))
+            return
 
         try:
             self.r.publish(
@@ -686,6 +751,9 @@ class MindSignalStreamer(Cortex):
     def on_headset_disconnected(self, *args, **kwargs):
         """헤드셋 분리 시 알림 발행함 (자동 재연결 안 함)"""
         print(f"[ALERT] 헤드셋 분리 감지됨 (subject {self.subject_index})")
+        if self.message_bus == "memory":
+            self._post_status_to_proxy("disconnected")
+            return
         try:
             status_msg = json.dumps(
                 {
@@ -1000,7 +1068,11 @@ class MindSignalStreamer(Cortex):
             self.csv_rows_written += 1
 
             # 2. alignment_location에 따라 proxy 또는 Redis로 샘플 발행함
-            if self.alignment_location == "proxy":
+            if self.alignment_location == "proxy" and not self.proxy_fail_closed:
+                # 1인 memory 측정 — 전송 실패가 CSV 기록을 막지 않게 함
+                self.seq += 1
+                self._post_sample_best_effort(powers)
+            elif self.alignment_location == "proxy":
                 # proxy 모드 — 시퀀스 증가 후 HTTP로 포워딩함
                 self.seq += 1
                 try:
@@ -1047,6 +1119,38 @@ class MindSignalStreamer(Cortex):
 
             # 분석 완료 후 버퍼 초기화함 (비오버랩 방식)
             self.eeg_buffer = []
+
+    def _post_sample_best_effort(self, powers: dict) -> None:
+        """1인 memory 측정의 샘플 1건을 프록시로 보냄 (실패해도 측정 계속).
+
+        be 모드가 Redis publish 실패에 경고만 남기고 CSV를 계속 쓰던 동작을
+        잇되, EEG 콜백을 오래 막지 않도록 재시도 없이 짧은 시간 제한으로 1회만
+        시도함. 실패하면 PROXY_SKIP_AFTER_FAILURE_SEC 동안 전송을 건너뜀.
+
+        Args:
+            powers - 5대역 파워 dict임
+        """
+        if time.monotonic() < self._proxy_skip_until:
+            return
+        try:
+            post_sample(
+                proxy_url=self.proxy_url,
+                secret_key=self.engine_secret_key,
+                group_id=self.group_id,
+                subject_idx=self.subject_index,
+                seq=self.seq,
+                payload=powers,
+                metrics=dict(self.latest_met),
+                sync_meta={"de_clock_domain": "monotonic_ns"},
+                max_retries=0,
+                timeout=self.solo_sample_post_timeout_sec,
+            )
+        except ProxyForwardError as e:
+            self._proxy_skip_until = time.monotonic() + PROXY_SKIP_AFTER_FAILURE_SEC
+            logger.warning(
+                f"proxy 전송 실패 (CSV 저장은 계속, {PROXY_SKIP_AFTER_FAILURE_SEC:.0f}초간"
+                f" 전송 건너뜀): {e}"
+            )
 
     def _handle_sigterm(self, signum, frame):
         """SIGTERM 수신 시 graceful shutdown 수행함"""
