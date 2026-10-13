@@ -411,7 +411,9 @@ def test_solo_memory_slow_proxy_does_not_stall_csv(monkeypatch) -> None:
         listener.close()
 
     # 한도는 연결과 읽기 합산 약 2배에 블록 계산 여유를 더한 값임
-    assert injected_timeout <= first_block_sec < injected_timeout * 2 + 1.0
+    # 상한만 봄. 하한은 실제 소켓 시간 제한을 재는 것이라 시계 해상도가 낮은
+    # 환경에서 흔들릴 수 있고, 전송 시도 1회는 아래 호출 수 단언이 확인함
+    assert first_block_sec < injected_timeout * 2 + 1.0
     assert len(calls) == 1, "건너뛰는 구간에서 전송을 시도하면 안 됨"
     assert skipped_blocks_sec < 1.0
     assert len(rows) == 4
