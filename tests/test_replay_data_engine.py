@@ -144,6 +144,9 @@ def test_replay_posts_envelopes_and_writes_engine_csv(
     assert stats == {"rows": 2, "sent": 3, "failed": 0, "skipped": 1}
     bodies = [json.loads(r.content) for r in httpx_mock.get_requests()]
     assert [b["seq"] for b in bodies] == [1, 2, 2]
+    # 재전송은 실제 엔진 재시도처럼 de_ts_ns까지 같은 envelope임
+    assert bodies[1] == bodies[2]
+    assert bodies[0]["de_ts_ns"] != bodies[1]["de_ts_ns"]
     first = bodies[0]
     assert first["group_id"] == GROUP_ID and first["subject_idx"] == 2
     assert first["de_ts_ns"].isdigit()

@@ -23,6 +23,7 @@ import csv
 import math
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,7 +37,7 @@ from pydantic import BaseModel, Field
 # scripts/ 직접 실행 시에도 엔진 패키지를 import 하도록 레포 루트를 경로에 추가함
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from server.services.proxy_client import post_sample  # noqa: E402
+from server.services.proxy_client import get_shared_client  # noqa: E402
 from server.services.session_csv import (  # noqa: E402
     METRIC_COLUMNS,
     SESSION_CSV_DIR,
@@ -150,6 +151,73 @@ def csv_out_row(
             for col in CSV_HEADER[1 + len(WAVE_COLUMNS) + len(METRIC_COLUMNS) :]
         ],
     ]
+
+
+def build_envelope(
+    group_id: str,
+    subject_idx: int,
+    seq: int,
+    payload: dict[str, float],
+    metrics: dict[str, float],
+) -> dict:
+    """프록시 /ingest/sample envelope을 만듦 (proxy_client.post_sample과 같은 본문).
+
+    de_ts_ns는 여기서 한 번만 찍음. 실제 엔진처럼 재시도와 재전송이 같은
+    envelope(같은 seq와 de_ts_ns)을 그대로 다시 보내게 하기 위함임.
+
+    Args:
+        group_id: 측정 그룹 ID.
+        subject_idx: 피실험자 번호.
+        seq: 엔진 단위 단조 증가 시퀀스 번호.
+        payload: 5대역 값.
+        metrics: 6지표 값.
+
+    Returns:
+        envelope dict.
+    """
+    return {
+        "group_id": group_id,
+        "subject_idx": subject_idx,
+        "de_ts_ns": str(time.monotonic_ns()),
+        "seq": seq,
+        "payload": payload,
+        "sync_meta": {"de_clock_domain": "monotonic_ns"},
+        "metrics": dict(metrics),
+    }
+
+
+def _post_envelope(
+    proxy_url: str,
+    secret: str,
+    body: dict,
+    backoffs_sec: tuple[float, ...] = (0.1, 0.2),
+) -> None:
+    """envelope을 /ingest/sample로 보냄. post_sample처럼 같은 본문으로 재시도함.
+
+    Args:
+        proxy_url: 프록시 베이스 URL.
+        secret: X-Engine-Secret 헤더 값.
+        body: build_envelope가 만든 envelope.
+        backoffs_sec: 재시도 전 대기 시간 목록. 총 시도는 1 + 길이임.
+
+    Raises:
+        httpx.HTTPError: 재시도를 다 쓰고도 실패하면 마지막 오류를 냄.
+    """
+    last: httpx.HTTPError | None = None
+    for wait in (0.0, *backoffs_sec):
+        time.sleep(wait)
+        try:
+            response = get_shared_client().post(
+                f"{proxy_url}/ingest/sample",
+                headers={"X-Engine-Secret": secret},
+                json=body,
+            )
+            response.raise_for_status()
+            return
+        except httpx.HTTPError as e:
+            last = e
+    assert last is not None
+    raise last
 
 
 @dataclass
@@ -267,19 +335,13 @@ async def _replay(cfg: ReplayConfig, group_id: str, out_path: Path, stats: dict)
             writer.writerow(csv_out_row(row, payload, metrics, datetime.now()))
             out.flush()
             seq += 1
+            body = build_envelope(group_id, cfg.subject_index, seq, payload, metrics)
+            # 재전송은 실제 엔진 재시도처럼 같은 envelope을 그대로 다시 보냄
             sends = 2 if cfg.resend_every and seq % cfg.resend_every == 0 else 1
             for _ in range(sends):
                 try:
                     await asyncio.to_thread(
-                        post_sample,
-                        cfg.proxy_url,
-                        cfg.secret,
-                        group_id,
-                        cfg.subject_index,
-                        seq,
-                        payload,
-                        {"de_clock_domain": "monotonic_ns"},
-                        metrics=dict(metrics),
+                        _post_envelope, cfg.proxy_url, cfg.secret, body
                     )
                     stats["sent"] += 1
                 except Exception as e:  # noqa: BLE001 — 재생은 실패해도 계속함

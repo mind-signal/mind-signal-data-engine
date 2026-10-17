@@ -4,6 +4,8 @@
 // 프록시의 BACKEND_URL을 이 중계기로 돌리면, 프록시의 /proxy 네임스페이스 연결을 받아
 // 같은 auth(engineSecret)로 실제 백엔드 /proxy에 연결하고 이벤트를 ack까지 그대로 넘김.
 // --delay-subject와 --delay-ms를 주면 그 subject의 proxy:sample만 늦게 넘김.
+// --dup-every N을 주면 proxy:sample 프레임 N개마다 같은 프레임을 한 번 더 넘김
+// (프록시 재연결 뒤 replay로 같은 envelope이 다시 오는 경우 재현).
 // 프록시 수신 시각은 그대로이고 백엔드 도착만 늦어지는 경우(EEG-W006)를 재현함.
 // /socket.io 밖의 HTTP 요청(프록시 be-notifier의 register-pending 등)은 그대로 전달함.
 //
@@ -16,11 +18,12 @@ const http = require('http');
 const { parseArgs } = require('util');
 
 const USAGE = `사용법: NODE_PATH={backend}/node_modules node relay.js --port N --backend-url URL
-       [--delay-subject 1|2 --delay-ms N]`;
+       [--delay-subject 1|2 --delay-ms N] [--dup-every N]`;
 
 /**
  * 인자를 해석함. 잘못되면 사용법을 출력하고 끝냄.
- * @returns {{port:number, backendUrl:string, delaySubject:number|null, delayMs:number}}
+ * @returns {{port:number, backendUrl:string, delaySubject:number|null, delayMs:number,
+ *   dupEvery:number}}
  */
 function parseCli() {
   const { values } = parseArgs({
@@ -29,6 +32,7 @@ function parseCli() {
       'backend-url': { type: 'string', default: 'http://127.0.0.1:5100' },
       'delay-subject': { type: 'string' },
       'delay-ms': { type: 'string', default: '0' },
+      'dup-every': { type: 'string', default: '0' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -38,11 +42,18 @@ function parseCli() {
   }
   const delaySubject = values['delay-subject'] ? Number(values['delay-subject']) : null;
   const delayMs = Number(values['delay-ms']);
-  if (![null, 1, 2].includes(delaySubject) || !(delayMs >= 0)) {
+  const dupEvery = Number(values['dup-every']);
+  if (![null, 1, 2].includes(delaySubject) || !(delayMs >= 0) || !Number.isInteger(dupEvery) || dupEvery < 0) {
     console.error(USAGE);
     process.exit(2);
   }
-  return { port: Number(values.port), backendUrl: values['backend-url'], delaySubject, delayMs };
+  return {
+    port: Number(values.port),
+    backendUrl: values['backend-url'],
+    delaySubject,
+    delayMs,
+    dupEvery,
+  };
 }
 
 /**
@@ -51,13 +62,17 @@ function parseCli() {
  * @param {object} from 이벤트를 받는 소켓
  * @param {object} to 이벤트를 보낼 소켓
  * @param {(event:string, args:unknown[]) => number} delayOf 이벤트별 지연(ms)
+ * @param {(event:string, args:unknown[]) => boolean} [dupOf] 참이면 같은 프레임을 한 번 더
+ *   보냄. 중복분의 응답은 버림(프록시는 원래 프레임 하나의 ack만 기다림)
  */
-function pipeEvents(from, to, delayOf) {
+function pipeEvents(from, to, delayOf, dupOf = () => false) {
   from.onAny((event, ...args) => {
     const ack = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+    const dup = dupOf(event, args);
     const send = () => {
       if (ack) to.emit(event, ...args, (...res) => ack(...res));
       else to.emit(event, ...args);
+      if (dup) to.emit(event, ...args, () => {});
     };
     const ms = delayOf(event, args);
     if (ms > 0) setTimeout(send, ms);
@@ -94,7 +109,8 @@ function main() {
   });
 
   const nsp = new Server(server, { cors: { origin: '*' } }).of('/proxy');
-  const counts = { forwarded: 0, delayed: 0 };
+  const counts = { forwarded: 0, delayed: 0, duplicated: 0 };
+  let samples = 0;
 
   // 백엔드 연결이 성공해야 프록시 연결을 받음. 시크릿 오류도 프록시에 그대로 전달됨
   nsp.use((socket, next) => {
@@ -116,25 +132,39 @@ function main() {
   nsp.on('connection', (socket) => {
     const up = socket.data.up;
     console.log(`[relay] proxy 연결됨: ${socket.id}`);
-    pipeEvents(socket, up, (event, args) => {
-      counts.forwarded++;
-      const subject = args[0] && args[0].subject_idx;
-      if (event === 'proxy:sample' && subject === cfg.delaySubject && cfg.delayMs > 0) {
-        counts.delayed++;
-        return cfg.delayMs;
-      }
-      return 0;
-    });
+    pipeEvents(
+      socket,
+      up,
+      (event, args) => {
+        counts.forwarded++;
+        const subject = args[0] && args[0].subject_idx;
+        if (event === 'proxy:sample' && subject === cfg.delaySubject && cfg.delayMs > 0) {
+          counts.delayed++;
+          return cfg.delayMs;
+        }
+        return 0;
+      },
+      (event) => {
+        if (event !== 'proxy:sample' || cfg.dupEvery === 0) return false;
+        samples++;
+        if (samples % cfg.dupEvery !== 0) return false;
+        counts.duplicated++;
+        return true;
+      },
+    );
     pipeEvents(up, socket, () => 0);
     socket.on('disconnect', () => up.close());
     up.on('disconnect', () => socket.disconnect(true));
   });
 
-  setInterval(() => console.log(`[relay] 전달 ${counts.forwarded}, 지연 ${counts.delayed}`), 30000).unref();
+  const summary = () =>
+    console.log(`[relay] 전달 ${counts.forwarded}, 지연 ${counts.delayed}, 중복 ${counts.duplicated}`);
+  setInterval(summary, 30000).unref();
 
   server.listen(cfg.port, '127.0.0.1', () => {
     const delay = cfg.delaySubject ? `subject ${cfg.delaySubject} +${cfg.delayMs}ms` : '지연 없음';
-    console.log(`[relay] :${cfg.port} → ${cfg.backendUrl} (${delay})`);
+    const dup = cfg.dupEvery ? `, ${cfg.dupEvery}개마다 중복` : '';
+    console.log(`[relay] :${cfg.port} → ${cfg.backendUrl} (${delay}${dup})`);
   });
 }
 

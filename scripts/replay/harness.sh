@@ -2,13 +2,14 @@
 # OPS-W019 맥미니 한 대 재생 하네스 기동, 종료, 정리 스크립트임.
 #
 #   harness.sh start --bus memory|redis --csv1 {subject1 CSV} --csv2 {subject2 CSV}
-#                    [--relay-delay-subject 1|2 --relay-delay-ms N]
+#                    [--relay-delay-subject 1|2 --relay-delay-ms N] [--relay-dup-every N]
 #   harness.sh stop
 #   harness.sh clean {groupId}
 #
 # 기동 순서: 백엔드(5100) → [중계기(5101)] → 프록시(5050) → 분석 엔진(5002)
 # → 가짜 엔진(5011, 5012). 중계기 인자를 주면 프록시 BACKEND_URL을 중계기로 돌려
 # 그 subject의 proxy:sample만 백엔드에 늦게 도착시킴 (relay.js, EEG-W006 재현).
+# --relay-dup-every N은 proxy:sample N개마다 같은 프레임을 한 번 더 백엔드로 넘김.
 # MongoDB(27017)와 Redis(6379)는 이미 떠 있어야 함 (ms-replay-mongo, ms-replay-redis).
 # JWT와 엔진 시크릿은 실행마다 무작위로 만들고 프로세스 환경으로만 넘김(파일에 안 남김).
 # 각 저장소의 .env 파일은 읽히지 않게 함: 백엔드는 NODE_ENV=replay(.env.replay 없음),
@@ -56,7 +57,7 @@ launch() {
 }
 
 cmd_start() {
-  local bus="" csv1="" csv2="" relay_subject="" relay_ms=""
+  local bus="" csv1="" csv2="" relay_subject="" relay_ms="" relay_dup=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --bus) bus=$2; shift 2 ;;
@@ -64,6 +65,7 @@ cmd_start() {
       --csv2) csv2=$2; shift 2 ;;
       --relay-delay-subject) relay_subject=$2; shift 2 ;;
       --relay-delay-ms) relay_ms=$2; shift 2 ;;
+      --relay-dup-every) relay_dup=$2; shift 2 ;;
       *) die "알 수 없는 인자: $1" ;;
     esac
   done
@@ -73,11 +75,17 @@ cmd_start() {
   csv1="$(cd "$(dirname "$csv1")" && pwd)/$(basename "$csv1")"
   csv2="$(cd "$(dirname "$csv2")" && pwd)/$(basename "$csv2")"
   [ -e "$RUN_DIR/pids" ] && die "이전 실행이 남아 있음. 먼저 harness.sh stop"
+  local relay_args=()
   if [ -n "$relay_subject$relay_ms" ]; then
     [[ "$relay_subject" =~ ^[12]$ ]] && [[ "$relay_ms" =~ ^[0-9]+$ ]] ||
       die "--relay-delay-subject 1|2 와 --relay-delay-ms N 을 함께 줘야 함"
-    APP_PORTS+=("$RELAY_PORT")
+    relay_args+=(--delay-subject "$relay_subject" --delay-ms "$relay_ms")
   fi
+  if [ -n "$relay_dup" ]; then
+    [[ "$relay_dup" =~ ^[1-9][0-9]*$ ]] || die "--relay-dup-every 는 1 이상 정수"
+    relay_args+=(--dup-every "$relay_dup")
+  fi
+  [ ${#relay_args[@]} -gt 0 ] && APP_PORTS+=("$RELAY_PORT")
 
   local busy=()
   for p in "${APP_PORTS[@]}"; do listening "$p" && busy+=("$p"); done
@@ -100,10 +108,10 @@ cmd_start() {
 
   # 프록시가 보는 백엔드 주소임. 중계기를 쓰면 중계기가 HTTP와 /proxy를 백엔드로 넘김
   local proxy_backend="http://127.0.0.1:$BE_PORT"
-  if [ -n "$relay_subject" ]; then
+  if [ ${#relay_args[@]} -gt 0 ]; then
     launch relay "$ENGINE_DIR" env NODE_PATH="$BACKEND_DIR/node_modules" \
       node scripts/replay/relay.js --port "$RELAY_PORT" --backend-url "$proxy_backend" \
-      --delay-subject "$relay_subject" --delay-ms "$relay_ms"
+      "${relay_args[@]}"
     wait_port "$RELAY_PORT" relay
     proxy_backend="http://127.0.0.1:$RELAY_PORT"
   fi
@@ -168,7 +176,7 @@ cmd_clean() {
   find "$CSV_DIR" -maxdepth 1 -type f -name "subject_[12]_${gid}_*.csv" -print -delete
 }
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
   -h|--help) usage ;;
