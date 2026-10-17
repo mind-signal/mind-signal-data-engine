@@ -55,6 +55,9 @@ chat:
 knowledge_base:
   code_guidelines:
     enabled: true
+    # 문자열 항목은 규칙 파일이 있는 폴더 아래에만 적용됨. .agents/rules/ 는
+    # 코드 폴더 밖이라 applyTo 로 저장소 전체에 적용함 (CodeRabbit PR #69)
     filePatterns:
       - "AGENTS.md"
-      - ".agents/rules/*.md"
+      - files: ".agents/rules/*.md"
+        applyTo: "**"

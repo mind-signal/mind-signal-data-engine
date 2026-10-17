@@ -131,11 +131,23 @@ app = FastAPI(
 # 헬퍼
 # ──────────────────────────────────────────────
 def _check_secret(x_engine_secret: str) -> None:
-    """X-Engine-Secret 헤더 검증함. 불일치 시 403 발생함."""
+    """X-Engine-Secret 헤더 검증함. 불일치 시 403 발생함.
+
+    실 DE의 stream/analyze/export 라우트 응답과 같음.
+    """
     if x_engine_secret != _secret_key:
         raise HTTPException(
             status_code=403, detail="인증 실패: 유효하지 않은 시크릿 키임"
         )
+
+
+def _check_control_secret(x_engine_secret: str) -> None:
+    """control 라우트용 시크릿 검증함. 불일치 시 401 발생함.
+
+    실 DE `server/routes/control.py`는 403이 아닌 401과 `invalid_secret`을 반환함.
+    """
+    if x_engine_secret != _secret_key:
+        raise HTTPException(status_code=401, detail={"error": "invalid_secret"})
 
 
 def _make_sin_wave(band: str, offset: float = 0.0) -> float:
@@ -302,14 +314,14 @@ class AssignGroupRequest(BaseModel):
 async def assign_group(
     req: AssignGroupRequest,
     x_engine_secret: str = Header(alias="X-Engine-Secret"),
-):
+) -> dict[str, str]:
     """Playwright runtime groupId 주입 + /register-dual trigger 처리함.
 
     실 DE `server/routes/control.py`가 이 헤더를 요구하므로 mock도 동일하게 요구함 —
     빠져 있으면 mock에서만 통과하는 호출을 실물이 거부하는 발산이 생김.
     """
     global _current_group_id
-    _check_secret(x_engine_secret)
+    _check_control_secret(x_engine_secret)
     _current_group_id = req.group_id
 
     public_url = f"http://localhost:{_args.port}"

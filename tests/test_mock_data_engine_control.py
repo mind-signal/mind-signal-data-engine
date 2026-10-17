@@ -49,8 +49,8 @@ def test_assign_group_without_header_is_rejected(mock_app) -> None:
     assert res.status_code == 422
 
 
-def test_assign_group_with_wrong_secret_is_403(mock_app) -> None:
-    """시크릿이 틀리면 403 반환함"""
+def test_assign_group_with_wrong_secret_is_401(mock_app) -> None:
+    """시크릿이 틀리면 실 DE control 라우트처럼 401과 invalid_secret을 반환함"""
     with TestClient(mock_app.app) as client:
         res = client.post(
             "/control/assign-group",
@@ -58,7 +58,8 @@ def test_assign_group_with_wrong_secret_is_403(mock_app) -> None:
             headers={"X-Engine-Secret": "wrong-secret"},
         )
 
-    assert res.status_code == 403
+    assert res.status_code == 401
+    assert res.json() == {"detail": {"error": "invalid_secret"}}
 
 
 def test_assign_group_with_valid_secret_registers(
