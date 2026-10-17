@@ -2,10 +2,13 @@
 # OPS-W019 맥미니 한 대 재생 하네스 기동, 종료, 정리 스크립트임.
 #
 #   harness.sh start --bus memory|redis --csv1 {subject1 CSV} --csv2 {subject2 CSV}
+#                    [--relay-delay-subject 1|2 --relay-delay-ms N]
 #   harness.sh stop
 #   harness.sh clean {groupId}
 #
-# 기동 순서: 백엔드(5100) → 프록시(5050) → 분석 엔진(5002) → 가짜 엔진(5011, 5012).
+# 기동 순서: 백엔드(5100) → [중계기(5101)] → 프록시(5050) → 분석 엔진(5002)
+# → 가짜 엔진(5011, 5012). 중계기 인자를 주면 프록시 BACKEND_URL을 중계기로 돌려
+# 그 subject의 proxy:sample만 백엔드에 늦게 도착시킴 (relay.js, EEG-W006 재현).
 # MongoDB(27017)와 Redis(6379)는 이미 떠 있어야 함 (ms-replay-mongo, ms-replay-redis).
 # JWT와 엔진 시크릿은 실행마다 무작위로 만들고 프로세스 환경으로만 넘김(파일에 안 남김).
 # 각 저장소의 .env 파일은 읽히지 않게 함: 백엔드는 NODE_ENV=replay(.env.replay 없음),
@@ -29,6 +32,7 @@ PX_PORT=5050
 AE_PORT=5002
 FE1_PORT=5011
 FE2_PORT=5012
+RELAY_PORT=5101
 APP_PORTS=("$BE_PORT" "$PX_PORT" "$AE_PORT" "$FE1_PORT" "$FE2_PORT")
 
 die() { echo "[harness] $*" >&2; exit 1; }
@@ -52,12 +56,14 @@ launch() {
 }
 
 cmd_start() {
-  local bus="" csv1="" csv2=""
+  local bus="" csv1="" csv2="" relay_subject="" relay_ms=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --bus) bus=$2; shift 2 ;;
       --csv1) csv1=$2; shift 2 ;;
       --csv2) csv2=$2; shift 2 ;;
+      --relay-delay-subject) relay_subject=$2; shift 2 ;;
+      --relay-delay-ms) relay_ms=$2; shift 2 ;;
       *) die "알 수 없는 인자: $1" ;;
     esac
   done
@@ -67,6 +73,11 @@ cmd_start() {
   csv1="$(cd "$(dirname "$csv1")" && pwd)/$(basename "$csv1")"
   csv2="$(cd "$(dirname "$csv2")" && pwd)/$(basename "$csv2")"
   [ -e "$RUN_DIR/pids" ] && die "이전 실행이 남아 있음. 먼저 harness.sh stop"
+  if [ -n "$relay_subject$relay_ms" ]; then
+    [[ "$relay_subject" =~ ^[12]$ ]] && [[ "$relay_ms" =~ ^[0-9]+$ ]] ||
+      die "--relay-delay-subject 1|2 와 --relay-delay-ms N 을 함께 줘야 함"
+    APP_PORTS+=("$RELAY_PORT")
+  fi
 
   local busy=()
   for p in "${APP_PORTS[@]}"; do listening "$p" && busy+=("$p"); done
@@ -87,8 +98,18 @@ cmd_start() {
     npm run dev
   wait_port "$BE_PORT" backend
 
+  # 프록시가 보는 백엔드 주소임. 중계기를 쓰면 중계기가 HTTP와 /proxy를 백엔드로 넘김
+  local proxy_backend="http://127.0.0.1:$BE_PORT"
+  if [ -n "$relay_subject" ]; then
+    launch relay "$ENGINE_DIR" env NODE_PATH="$BACKEND_DIR/node_modules" \
+      node scripts/replay/relay.js --port "$RELAY_PORT" --backend-url "$proxy_backend" \
+      --delay-subject "$relay_subject" --delay-ms "$relay_ms"
+    wait_port "$RELAY_PORT" relay
+    proxy_backend="http://127.0.0.1:$RELAY_PORT"
+  fi
+
   launch proxy "$PROXY_DIR" env DOTENV_CONFIG_PATH=/dev/null PROXY_PORT="$PX_PORT" \
-    BACKEND_URL="http://127.0.0.1:$BE_PORT" ENGINE_SECRET_KEY="$secret" \
+    BACKEND_URL="$proxy_backend" ENGINE_SECRET_KEY="$secret" \
     npm run dev
   wait_port "$PX_PORT" proxy
 
@@ -131,6 +152,8 @@ cmd_stop() {
   done <"$RUN_DIR/pids"
   sleep 3
   while read -r pid _; do kill -KILL -- "-$pid" 2>/dev/null || true; done <"$RUN_DIR/pids"
+  # 중계기를 띄운 실행이면 그 포트도 닫혔는지 봄
+  grep -q ' relay$' "$RUN_DIR/pids" && APP_PORTS+=("$RELAY_PORT")
   rm "$RUN_DIR/pids"
   local left=()
   for p in "${APP_PORTS[@]}"; do listening "$p" && left+=("$p"); done
@@ -145,7 +168,7 @@ cmd_clean() {
   find "$CSV_DIR" -maxdepth 1 -type f -name "subject_[12]_${gid}_*.csv" -print -delete
 }
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
   -h|--help) usage ;;
