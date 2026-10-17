@@ -149,8 +149,11 @@ def judge(
     session_statuses: list[str],
     analysis: dict | None,
     analysis_status_events: list[dict],
+    natural: bool = False,
+    stop_reasons: list[str | None] | None = None,
+    complete_stop_reasons: list[str | None] | None = None,
 ) -> dict:
-    """PLAN 6.4절 판정 4개를 계산함.
+    """PLAN 6.4절 판정 4개를 계산함. natural이면 자연 종료 판정 2개를 더함.
 
     Args:
         pairs: 받은 aligned_pair 데이터 목록.
@@ -158,7 +161,12 @@ def judge(
         complete_events: measurement-complete 수신 횟수.
         session_statuses: 그룹의 두 세션 상태.
         analysis: GET /api/analysis/:groupId 의 data. 없으면 None.
-        analysis_status_events: analysis-status 수신 목록 (PARTIAL, ABORTED만 옴).
+        analysis_status_events: analysis-status 수신 목록. SESSION-W008 전에는
+            PARTIAL, ABORTED만 오고 그 뒤에는 VALID도 옴.
+        natural: 자연 종료 시나리오면 참. stop_reason, tier_event 항목을 더함.
+        stop_reasons: 그룹 상태 응답에서 읽은 두 세션의 stopReason. 응답에 필드가
+            없으면 그 자리는 None 임.
+        complete_stop_reasons: measurement-complete 이벤트의 stopReason (참고값).
 
     Returns:
         항목별 pass 여부와 수치, 전체 pass를 담은 dict.
@@ -168,9 +176,10 @@ def judge(
     replay_rows = min(rows.values()) if rows else 0
     paired_ratio = both / replay_rows if replay_rows else 0.0
     single_ratio = single / len(pairs) if pairs else 1.0
-    # BE는 VALID 등급을 응답이나 이벤트로 알리지 않음. DUAL 분석 결과가 있고
+    # SESSION-W008 전의 BE는 VALID 등급을 알리지 않음. DUAL 분석 결과가 있고
     # PARTIAL/ABORTED 이벤트가 없으면 VALID로 간주함
     tiers = [e.get("tier") for e in analysis_status_events]
+    bad_tiers = [t for t in tiers if t in ("PARTIAL", "ABORTED")]
     result = {
         "aligned_pairs": {
             "pass": replay_rows > 0 and paired_ratio >= MIN_PAIRED_RATIO,
@@ -192,12 +201,22 @@ def judge(
             "statuses": session_statuses,
         },
         "analysis": {
-            "pass": analysis is not None and not analysis.get("isBTI") and not tiers,
+            "pass": analysis is not None
+            and not analysis.get("isBTI")
+            and not bad_tiers,
             "received": analysis is not None,
             "isBTI": None if analysis is None else analysis.get("isBTI"),
             "tier_events": tiers,
         },
     }
+    if natural:
+        reasons = stop_reasons or []
+        result["stop_reason"] = {
+            "pass": len(reasons) == 2 and all(r == "Natural" for r in reasons),
+            "reasons": reasons,
+            "complete_event_reasons": complete_stop_reasons or [],
+        }
+        result["tier_event"] = {"pass": "VALID" in tiers, "tiers": tiers}
     result["pass"] = all(v["pass"] for v in result.values())
     return result
 
@@ -342,16 +361,20 @@ def run(args: argparse.Namespace) -> dict:
     )
     if not ready or sock.named("dual-session-failed"):
         raise RuntimeError(f"측정 시작 실패: {sock.named('dual-session-failed')}")
-    log(f"측정 시작. {args.duration_sec}초 대기함")
-    time.sleep(args.duration_sec)
-
-    stop = d.call(
-        "POST",
-        "/api/engine/stream/stop-all",
-        op,
-        json={"groupId": group_id, "stopReason": "Natural"},
-    )
-    log(f"stop-all: {stop}")
+    if args.natural:
+        # 자연 종료: 엔진이 CSV를 올리면 BE가 스스로 끝내야 함. stop-all 안 부름
+        log(f"측정 시작. 자연 종료를 최대 {args.duration_sec + 120}초 기다림")
+        _wait(lambda: sock.named("measurement-complete"), args.duration_sec + 120)
+    else:
+        log(f"측정 시작. {args.duration_sec}초 대기함")
+        time.sleep(args.duration_sec)
+        stop = d.call(
+            "POST",
+            "/api/engine/stream/stop-all",
+            op,
+            json={"groupId": group_id, "stopReason": "Natural"},
+        )
+        log(f"stop-all: {stop}")
 
     def _analysis():
         """분석 결과가 있으면 data를, analysis-status 이벤트가 왔으면 표지를 반환함."""
@@ -360,9 +383,12 @@ def run(args: argparse.Namespace) -> dict:
         )
         if r.status_code == 200:
             return r.json()["data"]
-        return sock.named("analysis-status") and {"_aborted": True}
+        tiers = [e.get("tier") for e in sock.named("analysis-status")]
+        return ("PARTIAL" in tiers or "ABORTED" in tiers) and {"_aborted": True}
 
-    analysis = _wait(_analysis, args.analysis_timeout_sec, 2.0)
+    # 자연 종료가 안 됐으면 분석도 시작되지 않으므로 폴링을 건너뜀
+    ended = not args.natural or sock.named("measurement-complete")
+    analysis = _wait(_analysis, args.analysis_timeout_sec, 2.0) if ended else None
     if analysis and analysis.get("_aborted"):
         analysis = None
     _wait(lambda: sock.named("measurement-complete"), 10)
@@ -372,13 +398,19 @@ def run(args: argparse.Namespace) -> dict:
 
     csv_dir = Path(args.csv_dir)
     rows = {i: count_csv_rows(csv_dir, group_id, i) for i in (1, 2)}
+    group_sessions = sessions["data"]["sessions"]
     verdict = judge(
         sock.named("aligned_pair"),
         rows,
         len(sock.named("measurement-complete")),
-        [s["status"] for s in sessions["data"]["sessions"]],
+        [s["status"] for s in group_sessions],
         analysis,
         sock.named("analysis-status"),
+        natural=args.natural,
+        stop_reasons=[s.get("stopReason") for s in group_sessions],
+        complete_stop_reasons=[
+            e.get("stopReason") for e in sock.named("measurement-complete")
+        ],
     )
     return {"groupId": group_id, "run": run_id, "verdict": verdict}
 
@@ -397,6 +429,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--duration-sec", type=float, default=200)
     p.add_argument("--register-timeout-sec", type=float, default=60)
     p.add_argument("--analysis-timeout-sec", type=float, default=180)
+    p.add_argument(
+        "--natural",
+        action="store_true",
+        help="stop-all 없이 자연 종료를 기다리고 stop_reason, tier_event를 판정에 더함 "
+        "(가짜 엔진 --natural-end와 함께 씀)",
+    )
     return p.parse_args(argv)
 
 
