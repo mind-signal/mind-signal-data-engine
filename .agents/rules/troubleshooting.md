@@ -30,6 +30,9 @@ pip install -r requirements.txt
 - If you skip `conda activate mind-signal`, you get the system Python (3.13/3.9) and dependencies break.
 - Verify with `python --version` after activating — don't assume the shell already has the right interpreter selected.
 
+Notebook B (DE_B) setup and diagnosis are documented separately in
+`.agents/rules/notebook-b-operations.md`.
+
 ## Cortex TLS certificate — `certificates/rootCA.pem` required locally
 
 `sdk/cortex.py` reads `certificates/rootCA.pem` (repo root) as the TLS CA for the Cortex `wss://` connection. This file is gitignored, so it does not travel with a clone — it must be copied onto every new machine by hand (copy it from an existing Emotiv install).
