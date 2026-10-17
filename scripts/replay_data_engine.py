@@ -166,6 +166,8 @@ class ReplayConfig:
     csv_dir: Path = SESSION_CSV_DIR
     delay_ms: int = 0
     resend_every: int = 0
+    natural_end: bool = False
+    max_rows: int = 0
     reregister_sec: float = 20.0
 
 
@@ -242,6 +244,8 @@ async def _replay(cfg: ReplayConfig, group_id: str, out_path: Path, stats: dict)
     """CSV 행을 timestamp 간격대로 프록시에 보내고 재생 CSV에 기록함."""
     with open(cfg.csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+    if cfg.max_rows:
+        rows = rows[: cfg.max_rows]
     intervals = replay_intervals([r.get("timestamp", "") for r in rows])
     metrics = {m: 0.0 for m in METRIC_COLUMNS}
     loop = asyncio.get_running_loop()
@@ -283,6 +287,9 @@ async def _replay(cfg: ReplayConfig, group_id: str, out_path: Path, stats: dict)
                     print(f"[WARN] sample seq={seq} 전송 실패: {e}")
             stats["rows"] = seq
     print(f"[replay] 재생 끝남: {stats}")
+    if cfg.natural_end:
+        # 실제 엔진 core/streamer.py on_close처럼 CSV를 닫은 직후 BE로 올림
+        stats["natural_uploaded"] = await asyncio.to_thread(_upload_csv, cfg, out_path)
 
 
 def create_app(cfg: ReplayConfig) -> FastAPI:
@@ -309,8 +316,18 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
 
     app = FastAPI(title="Mind Signal Replay Data Engine", lifespan=lifespan)
 
+    def _reap() -> None:
+        """끝난 재생을 목록에서 지움.
+
+        실제 엔진 get_all_status가 끝난 프로세스를 정리하는 것과 같음. 그래서
+        재생이 끝난 뒤 /health나 assign-group이 먼저 불리면 stop은 404가 됨.
+        """
+        for key in [k for k, s in streams.items() if s["task"].done()]:
+            del streams[key]
+
     def _streaming(group_id: str | None = None) -> bool:
         """재생 중인 스트림이 있는지 반환함. group_id를 주면 그 그룹만 봄."""
+        _reap()
         return any(
             not s["task"].done()
             for key, s in streams.items()
@@ -420,6 +437,9 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
     ):
         """재생을 멈추고 응답 전에 재생 CSV를 BE로 업로드함.
 
+        실제 엔진 stop_stream처럼 재생이 이미 끝났어도 목록에 남아 있으면 다시
+        업로드함(BE 저장은 덮어쓰기라 멱등). 목록에서 정리됐으면 404 임.
+
         Args:
             body: group_id와 subject_index를 담은 요청 바디.
             x_engine_secret: X-Engine-Secret 헤더 값.
@@ -472,6 +492,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="N행마다 같은 행을 한 번 더 보냄 (0=끔)",
     )
+    p.add_argument(
+        "--natural-end",
+        action="store_true",
+        help="CSV를 다 보내면 실제 엔진 on_close처럼 CSV를 BE로 올림 (자연 종료)",
+    )
+    p.add_argument(
+        "--max-rows",
+        type=int,
+        default=0,
+        help="재생할 CSV 행 수 상한 (0=전부). 등급 VALID 판정에는 200 이상",
+    )
     return p.parse_args(argv)
 
 
@@ -494,6 +525,8 @@ def main() -> None:
         csv_dir=args.csv_dir,
         delay_ms=args.delay_ms,
         resend_every=args.resend_every,
+        natural_end=args.natural_end,
+        max_rows=args.max_rows,
     )
     uvicorn.run(create_app(cfg), host="0.0.0.0", port=args.port, log_level="info")
 

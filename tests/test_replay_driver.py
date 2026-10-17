@@ -139,3 +139,29 @@ def test_socket_recorder_parses_events_acks_and_pings():
     assert rec.acks == [[{"ok": True, "groupId": "g"}]]
     assert rec.named("aligned_pair") == [{"subject_1": None}]
     assert rec.named("measurement-complete") == [{"status": "COMPLETED"}]
+
+
+def test_natural_adds_stop_reason_and_tier_event():
+    """natural이면 stop_reason과 tier_event가 판정에 들어가는지 확인함."""
+    ok = _judge(
+        natural=True,
+        stop_reasons=["Natural", "Natural"],
+        analysis_status_events=[{"tier": "VALID"}],
+    )
+    assert ok["pass"] and ok["analysis"]["pass"]
+    assert ok["tier_event"]["tiers"] == ["VALID"]
+
+    before_w008 = _judge(natural=True, stop_reasons=[None, None])
+    assert not before_w008["stop_reason"]["pass"]
+    assert not before_w008["tier_event"]["pass"]
+    assert not before_w008["pass"]
+
+    manual = _judge(natural=True, stop_reasons=["Natural", "ManualEarly"])
+    assert not manual["stop_reason"]["pass"]
+
+
+def test_non_natural_ignores_natural_items():
+    """natural이 아니면 자연 종료 항목을 넣지 않는지 확인함."""
+    v = _judge(stop_reasons=[None, None])
+    assert v["pass"]
+    assert "stop_reason" not in v and "tier_event" not in v

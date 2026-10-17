@@ -218,3 +218,60 @@ def test_stop_uploads_csv_before_responding(tmp_path: Path, httpx_mock: HTTPXMoc
     assert uploads[0].url.params["filename"].startswith(f"subject_2_{GROUP_ID}_")
     assert uploads[0].headers["Content-Type"] == "text/csv"
     assert uploads[0].content.startswith(b"timestamp,delta")
+
+
+def test_natural_end_uploads_once_after_max_rows(tmp_path: Path, httpx_mock: HTTPXMock):
+    """--natural-end는 max_rows만큼 보낸 뒤 CSV를 한 번 올리는지 확인함."""
+    httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
+    httpx_mock.add_response(url=re.compile(rf"{BACKEND}/api/engine/csv-upload.*"))
+    src = _write_csv(
+        tmp_path / "in.csv",
+        [_row(f"2026-09-07 10:00:00.0{i}") for i in range(5)],
+    )
+    cfg = _cfg(tmp_path, src, natural_end=True, max_rows=3)
+    cfg.csv_dir.mkdir()
+    out = cfg.csv_dir / f"subject_2_{GROUP_ID}_20261018_100000.csv"
+    stats = {"rows": 0, "sent": 0, "failed": 0, "skipped": 0}
+    asyncio.run(rde._replay(cfg, GROUP_ID, out, stats))
+
+    assert stats["rows"] == 3 and stats["natural_uploaded"] is True
+    paths = [r.url.path for r in httpx_mock.get_requests()]
+    assert paths.count("/ingest/sample") == 3
+    assert paths[-1] == "/api/engine/csv-upload"
+
+
+def test_stop_after_natural_end_matches_real_engine(
+    tmp_path: Path, httpx_mock: HTTPXMock
+):
+    """자연 종료 뒤 stop은 실제 엔진처럼 다시 올리고, /health 정리 뒤에는 404인지 확인함."""
+    httpx_mock.add_response(url=f"{PROXY}/register", is_reusable=True, is_optional=True)
+    httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
+    httpx_mock.add_response(
+        url=re.compile(rf"{BACKEND}/api/engine/csv-upload.*"), is_reusable=True
+    )
+    src = _write_csv(tmp_path / "in.csv", [_row("2026-09-07 10:00:00")])
+    app = rde.create_app(_cfg(tmp_path, src, natural_end=True))
+    body = {"group_id": GROUP_ID, "subject_index": 2}
+    headers = {"X-Engine-Secret": SECRET}
+
+    def uploads() -> int:
+        """지금까지 csv-upload 요청 수를 셈."""
+        return sum(
+            r.url.path == "/api/engine/csv-upload" for r in httpx_mock.get_requests()
+        )
+
+    with TestClient(app) as client:
+        client.post("/api/stream/start", json=body, headers=headers)
+        time.sleep(0.3)  # 재생과 자연 종료 업로드가 끝나도록 기다림
+        assert uploads() == 1
+        assert client.post("/api/stream/stop", json=body, headers=headers).json()[
+            "uploaded"
+        ]
+        assert uploads() == 2
+
+        client.post("/api/stream/start", json=body, headers=headers)
+        time.sleep(0.3)
+        assert client.get("/health").json()["streaming"] is False
+        stop = client.post("/api/stream/stop", json=body, headers=headers)
+        assert stop.status_code == 404
+        assert uploads() == 3
