@@ -25,12 +25,14 @@ drv = _load()
 
 
 def _pairs(both: int, single: int) -> list[dict]:
+    """양쪽 쌍 both개와 한쪽 쌍 single개로 된 aligned_pair 목록을 만듦."""
     return [{"subject_1": WAVES, "subject_2": WAVES}] * both + [
         {"subject_1": WAVES, "subject_2": None}
     ] * single
 
 
 def _judge(**over: Any) -> dict:
+    """모든 항목이 통과하는 기본값으로 judge를 호출함. over로 인자를 바꿈."""
     kwargs = dict(
         pairs=_pairs(190, 5),
         rows={1: 200, 2: 198},
@@ -44,6 +46,7 @@ def _judge(**over: Any) -> dict:
 
 
 def test_all_pass():
+    """기본 입력에서 판정 4개가 모두 통과하는지 확인함."""
     v = _judge()
     assert v["pass"]
     assert v["aligned_pairs"]["both"] == 190
@@ -52,24 +55,28 @@ def test_all_pass():
 
 
 def test_paired_ratio_below_threshold_fails():
+    """양쪽 쌍 비율이 기준 미만이면 실패하는지 확인함."""
     v = _judge(pairs=_pairs(170, 0))
     assert not v["aligned_pairs"]["pass"]
     assert not v["pass"]
 
 
 def test_single_emit_ratio_over_threshold_fails():
+    """단독 emit 비율이 기준 초과면 실패하는지 확인함."""
     v = _judge(pairs=_pairs(190, 30))
     assert v["aligned_pairs"]["pass"]
     assert not v["single_emit"]["pass"]
 
 
 def test_no_pairs_fails_both_pair_checks():
+    """aligned_pair가 없으면 쌍 판정 둘 다 실패하는지 확인함."""
     v = _judge(pairs=[], rows={1: 0, 2: 0})
     assert not v["aligned_pairs"]["pass"]
     assert not v["single_emit"]["pass"]
 
 
 def test_measurement_complete_needs_one_event_and_two_completed():
+    """측정 종료 판정이 이벤트 1회와 두 세션 COMPLETED를 요구하는지 확인함."""
     assert not _judge(complete_events=2)["measurement_complete"]["pass"]
     assert not _judge(complete_events=0)["measurement_complete"]["pass"]
     statuses = ["COMPLETED", "CANCELLED"]
@@ -77,6 +84,7 @@ def test_measurement_complete_needs_one_event_and_two_completed():
 
 
 def test_analysis_fails_without_result_or_with_tier_event():
+    """분석 결과 없음, BTI 결과, 등급 이벤트 수신이면 분석 판정이 실패하는지 확인함."""
     assert not _judge(analysis=None)["analysis"]["pass"]
     assert not _judge(analysis={"isBTI": True})["analysis"]["pass"]
     partial = [{"tier": "PARTIAL"}]
@@ -84,6 +92,7 @@ def test_analysis_fails_without_result_or_with_tier_event():
 
 
 def test_count_csv_rows_uses_newest_file(tmp_path: Path):
+    """행 수 집계가 가장 최근 파일을 쓰고 파일이 없으면 0인지 확인함."""
     old = tmp_path / f"subject_1_{GROUP_ID}_20261018_100000.csv"
     new = tmp_path / f"subject_1_{GROUP_ID}_20261018_100500.csv"
     old.write_text("h\n1\n")
@@ -98,19 +107,23 @@ class _FakeWs:
     """recv 순서를 미리 정한 가짜 웹소켓임."""
 
     def __init__(self, frames: list[str]) -> None:
+        """recv가 차례로 돌려줄 프레임 목록을 받음."""
         self.frames = frames
         self.sent: list[str] = []
 
     def recv(self) -> str:
+        """다음 프레임을 반환함. 없으면 연결 끊김으로 OSError 발생함."""
         if not self.frames:
             raise OSError("closed")
         return self.frames.pop(0)
 
     def send(self, msg: str) -> None:
+        """보낸 프레임을 기록함."""
         self.sent.append(msg)
 
 
 def test_socket_recorder_parses_events_acks_and_pings():
+    """Socket.io 프레임에서 이벤트, 응답, ping 처리가 맞는지 확인함."""
     rec = drv.SocketRecorder("http://127.0.0.1:5100")
     assert rec._url == "ws://127.0.0.1:5100/socket.io/?EIO=4&transport=websocket"
     rec._ws = _FakeWs(

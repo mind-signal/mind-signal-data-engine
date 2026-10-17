@@ -130,7 +130,17 @@ def csv_out_row(
     metrics: dict[str, float],
     now: datetime,
 ) -> list:
-    """재생 CSV에 쓸 행을 실제 엔진 열 순서로 만듦. timestamp는 전송 시각임."""
+    """재생 CSV에 쓸 행을 실제 엔진 열 순서로 만듦. timestamp는 전송 시각임.
+
+    Args:
+        row: 원본 csv.DictReader 행. 채널별 대역 값을 여기서 가져옴.
+        payload: 5대역 값.
+        metrics: 6지표 값.
+        now: 행의 timestamp로 쓸 전송 시각.
+
+    Returns:
+        CSV_HEADER 순서의 값 목록. 비었거나 비유한인 채널 값은 빈 칸임.
+    """
     return [
         now.strftime("%Y-%m-%d %H:%M:%S.%f"),
         *[payload[b] for b in WAVE_COLUMNS],
@@ -288,6 +298,7 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """기동 시 상태 초기화와 프록시 재등록 태스크를 시작하고 종료 시 정리함."""
         app.state.registered_group_id = None
         app.state.assign_lock = asyncio.Lock()
         task = asyncio.create_task(_reregister_loop(cfg))
@@ -299,6 +310,7 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
     app = FastAPI(title="Mind Signal Replay Data Engine", lifespan=lifespan)
 
     def _streaming(group_id: str | None = None) -> bool:
+        """재생 중인 스트림이 있는지 반환함. group_id를 주면 그 그룹만 봄."""
         return any(
             not s["task"].done()
             for key, s in streams.items()
@@ -306,6 +318,7 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
         )
 
     def _check_secret(secret: str) -> None:
+        """stream 계열 시크릿 불일치 시 실제 엔진처럼 403 발생시킴."""
         if secret != cfg.secret:
             raise HTTPException(
                 status_code=403, detail="인증 실패: 유효하지 않은 시크릿 키임"
@@ -313,6 +326,7 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request):
+        """실제 엔진 /health와 같은 형태의 상태 반환함."""
         return {
             "status": "ok",
             "service": "mind-signal-data-engine",
@@ -327,6 +341,20 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
         request: Request,
         x_engine_secret: str = Header(alias="X-Engine-Secret"),
     ):
+        """groupId를 주입하고 BE register-dual을 호출함.
+
+        실제 엔진 `server/routes/control.py`의 계약을 따름: 시크릿 불일치 401
+        invalid_secret, 같은 groupId 재호출 already_registered, 재생 중 다른
+        groupId 409 group_id_conflict, BE 실패 502 backend_register_failed.
+
+        Args:
+            body: group_id를 담은 요청 바디.
+            request: 앱 상태 접근용 요청 객체.
+            x_engine_secret: X-Engine-Secret 헤더 값.
+
+        Returns:
+            status와 groupId를 담은 dict.
+        """
         state = request.app.state
         if x_engine_secret != cfg.secret:
             raise HTTPException(status_code=401, detail={"error": "invalid_secret"})
@@ -361,6 +389,15 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
     async def stream_start(
         body: StreamRequest, x_engine_secret: str = Header(alias="X-Engine-Secret")
     ):
+        """CSV 재생 태스크를 시작함.
+
+        Args:
+            body: group_id와 subject_index를 담은 요청 바디.
+            x_engine_secret: X-Engine-Secret 헤더 값.
+
+        Returns:
+            status, key, 재생 CSV 경로를 담은 dict.
+        """
         _check_secret(x_engine_secret)
         key = f"{body.group_id}:{body.subject_index}"
         if key in streams and not streams[key]["task"].done():
@@ -381,6 +418,15 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
     async def stream_stop(
         body: StreamRequest, x_engine_secret: str = Header(alias="X-Engine-Secret")
     ):
+        """재생을 멈추고 응답 전에 재생 CSV를 BE로 업로드함.
+
+        Args:
+            body: group_id와 subject_index를 담은 요청 바디.
+            x_engine_secret: X-Engine-Secret 헤더 값.
+
+        Returns:
+            status, key, 업로드 성공 여부, 재생 통계를 담은 dict.
+        """
         _check_secret(x_engine_secret)
         key = f"{body.group_id}:{body.subject_index}"
         if key not in streams:
@@ -399,6 +445,7 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """CLI 인자를 해석해 반환함."""
     p = argparse.ArgumentParser(
         description="실측 CSV를 재생해 프록시로 샘플을 보내는 가짜 엔진 (OPS-W019)"
     )

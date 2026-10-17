@@ -45,6 +45,7 @@ def _row(ts: str, **over: str) -> dict[str, str]:
 
 
 def _write_csv(path: Path, rows: list[dict[str, str]]) -> Path:
+    """합성 행을 실제 엔진 머리줄로 CSV 파일에 쓰고 경로를 반환함."""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=rde.CSV_HEADER)
         writer.writeheader()
@@ -53,6 +54,7 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> Path:
 
 
 def _cfg(tmp_path: Path, src: Path, **over: Any) -> Any:
+    """시험용 ReplayConfig를 만듦. over로 필드를 바꿈."""
     kwargs = dict(
         subject_index=2,
         port=5012,
@@ -68,6 +70,7 @@ def _cfg(tmp_path: Path, src: Path, **over: Any) -> Any:
 
 
 def test_header_matches_engine_column_order():
+    """재생 CSV 머리줄이 core/streamer.py 열 순서와 같은지 확인함."""
     assert rde.CSV_HEADER[:12] == [
         "timestamp",
         "delta",
@@ -88,6 +91,7 @@ def test_header_matches_engine_column_order():
 
 
 def test_empty_metric_keeps_previous_value():
+    """빈 지표나 비유한 지표가 직전 값으로 채워지는지 확인함."""
     zeros = {m: 0 for m in rde.METRIC_COLUMNS}
     _, first = rde.row_to_sample(_row("t", focus="", stress="nan"), zeros)
     assert first["focus"] == 0 and first["stress"] == 0
@@ -99,11 +103,13 @@ def test_empty_metric_keeps_previous_value():
 
 @pytest.mark.parametrize("bad", ["", "nan", "inf", "x"])
 def test_bad_band_value_drops_row(bad: str):
+    """대역 값이 비었거나 비유한이면 행을 버리는지 확인함."""
     zeros = {m: 0 for m in rde.METRIC_COLUMNS}
     assert rde.row_to_sample(_row("t", alpha=bad), zeros) is None
 
 
 def test_replay_intervals_follow_timestamps_with_fallback():
+    """재생 간격이 timestamp 차이를 따르고 해석 실패와 역행은 1초로 대체되는지 확인함."""
     got = rde.replay_intervals(
         [
             "2026-09-07 10:00:00.000000",
@@ -119,6 +125,7 @@ def test_replay_intervals_follow_timestamps_with_fallback():
 def test_replay_posts_envelopes_and_writes_engine_csv(
     tmp_path: Path, httpx_mock: HTTPXMock
 ):
+    """재생이 envelope 계약대로 전송하고 재전송과 행 버림을 반영해 CSV를 쓰는지 확인함."""
     httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
     src = _write_csv(
         tmp_path / "in.csv",
@@ -154,6 +161,7 @@ def test_replay_posts_envelopes_and_writes_engine_csv(
 
 
 def test_assign_group_contract(tmp_path: Path, httpx_mock: HTTPXMock):
+    """assign-group의 401, registered, already_registered 계약과 /health 반영을 확인함."""
     httpx_mock.add_response(url=f"{PROXY}/register", is_reusable=True, is_optional=True)
     httpx_mock.add_response(url=f"{BACKEND}/api/engine/register-dual")
     app = rde.create_app(_cfg(tmp_path, tmp_path / "in.csv"))
@@ -183,6 +191,7 @@ def test_assign_group_contract(tmp_path: Path, httpx_mock: HTTPXMock):
 
 
 def test_stop_uploads_csv_before_responding(tmp_path: Path, httpx_mock: HTTPXMock):
+    """stop 응답 전에 재생 CSV가 csv-upload 계약대로 올라가는지 확인함."""
     httpx_mock.add_response(url=f"{PROXY}/register", is_reusable=True, is_optional=True)
     httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
     httpx_mock.add_response(url=re.compile(rf"{BACKEND}/api/engine/csv-upload.*"))

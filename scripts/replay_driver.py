@@ -68,12 +68,19 @@ class SocketRecorder:
         self._thread.start()
 
     def emit(self, event: str, data: object, ack_id: int | None = None) -> None:
-        """이벤트를 보냄. ack_id가 있으면 서버 응답이 acks에 쌓임."""
+        """이벤트를 보냄.
+
+        Args:
+            event: 이벤트 이름.
+            data: 이벤트 데이터.
+            ack_id: 응답 ID. 주면 서버 응답이 acks에 쌓임.
+        """
         assert self._ws is not None
         prefix = "42" if ack_id is None else f"42{ack_id}"
         self._ws.send(prefix + json.dumps([event, data]))
 
     def _loop(self) -> None:
+        """수신 프레임을 이벤트, 응답, ping으로 나눠 처리함. 연결이 끊기면 끝남."""
         assert self._ws is not None
         while not self._stop.is_set():
             try:
@@ -94,7 +101,14 @@ class SocketRecorder:
                     self.acks.append(json.loads(body))
 
     def named(self, name: str) -> list:
-        """받은 이벤트 중 이름이 같은 것의 데이터 목록을 반환함."""
+        """받은 이벤트 중 이름이 같은 것의 데이터 목록을 반환함.
+
+        Args:
+            name: 이벤트 이름.
+
+        Returns:
+            수신 순서대로 정렬된 데이터 목록.
+        """
         with self._lock:
             return [data for _, n, data in self.events if n == name]
 
@@ -108,7 +122,16 @@ class SocketRecorder:
 
 
 def count_csv_rows(csv_dir: Path, group_id: str, subject_index: int) -> int:
-    """재생 CSV의 데이터 행 수(머리줄 제외)를 셈. 파일이 없으면 0 반환함."""
+    """재생 CSV의 데이터 행 수(머리줄 제외)를 셈.
+
+    Args:
+        csv_dir: 재생 CSV가 쌓이는 폴더.
+        group_id: 측정 그룹 ID.
+        subject_index: 피실험자 번호(1 또는 2).
+
+    Returns:
+        가장 최근 파일의 데이터 행 수. 파일이 없으면 0 반환함.
+    """
     files = sorted(
         csv_dir.glob(f"subject_{subject_index}_{group_id}_*.csv"),
         key=lambda p: p.stat().st_mtime,
@@ -187,7 +210,20 @@ class Driver:
         self.http = httpx.Client(base_url=backend_url, timeout=30)
 
     def call(self, method: str, path: str, token: str | None = None, **kw) -> dict:
-        """요청을 보내고 JSON을 반환함. 2xx가 아니면 본문과 함께 예외 발생함."""
+        """요청을 보내고 JSON을 반환함.
+
+        Args:
+            method: HTTP 메서드.
+            path: 백엔드 경로.
+            token: Bearer JWT. None이면 인증 헤더를 붙이지 않음.
+            **kw: httpx 요청 인자(json, params 등).
+
+        Returns:
+            응답 JSON. 본문이 없으면 빈 dict 반환함.
+
+        Raises:
+            RuntimeError: 응답 코드가 2xx가 아닐 때 본문 일부와 함께 발생함.
+        """
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         r = self.http.request(method, path, headers=headers, **kw)
         if r.status_code >= 300:
@@ -195,7 +231,16 @@ class Driver:
         return r.json() if r.content else {}
 
     def user(self, email: str, password: str, name: str) -> str:
-        """가입 후 로그인해 JWT를 반환함."""
+        """가입 후 로그인해 JWT를 반환함.
+
+        Args:
+            email: 실행마다 고유한 이메일.
+            password: 비밀번호.
+            name: 표시 이름.
+
+        Returns:
+            로그인 응답의 JWT 문자열.
+        """
         self.call(
             "POST",
             "/api/auth/signup",
@@ -213,7 +258,16 @@ class Driver:
 
 
 def _wait(predicate, timeout: float, interval: float = 1.0):
-    """predicate가 참 값을 낼 때까지 기다림. 시간 초과 시 None 반환함."""
+    """predicate가 참 값을 낼 때까지 기다림.
+
+    Args:
+        predicate: 인자 없이 호출하는 판정 함수.
+        timeout: 최대 대기 시간(초).
+        interval: 재호출 간격(초).
+
+    Returns:
+        predicate의 첫 참 값. 시간 초과 시 None 반환함.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
@@ -229,7 +283,18 @@ def log(msg: str) -> None:
 
 
 def run(args: argparse.Namespace) -> dict:
-    """측정 흐름 전체를 실행하고 판정 결과를 반환함."""
+    """측정 흐름 전체를 실행하고 판정 결과를 반환함.
+
+    Args:
+        args: _parse_args 결과.
+
+    Returns:
+        groupId, 실행 ID, 판정 dict를 담은 dict.
+
+    Raises:
+        RuntimeError: 엔진 등록, join-room, 측정 시작이 실패하거나 HTTP 호출이
+            2xx가 아닐 때 발생함.
+    """
     d = Driver(args.backend_url)
     run_id = uuid.uuid4().hex[:8]
     password = secrets.token_urlsafe(12)
@@ -253,6 +318,7 @@ def run(args: argparse.Namespace) -> dict:
     )
 
     def _registry():
+        """엔진 등록 상태를 조회해 두 엔진이 준비됐으면 그 상태를 반환함."""
         s = d.call(
             "GET", "/api/engine/registry-status", op, params={"groupId": group_id}
         )
@@ -288,6 +354,7 @@ def run(args: argparse.Namespace) -> dict:
     log(f"stop-all: {stop}")
 
     def _analysis():
+        """분석 결과가 있으면 data를, analysis-status 이벤트가 왔으면 표지를 반환함."""
         r = d.http.get(
             f"/api/analysis/{group_id}", headers={"Authorization": f"Bearer {op}"}
         )
@@ -317,6 +384,7 @@ def run(args: argparse.Namespace) -> dict:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """CLI 인자를 해석해 반환함."""
     p = argparse.ArgumentParser(
         description="DUAL_2PC 측정 흐름을 진행하고 PLAN 6.4절로 판정함 (OPS-W019)"
     )

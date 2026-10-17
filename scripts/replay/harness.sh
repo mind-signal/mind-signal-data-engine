@@ -63,6 +63,9 @@ cmd_start() {
   done
   [ "$bus" = memory ] || [ "$bus" = redis ] || die "--bus 는 memory 또는 redis"
   [ -f "$csv1" ] && [ -f "$csv2" ] || die "--csv1, --csv2 파일이 필요함"
+  # launch가 ENGINE_DIR로 이동하므로 상대 경로를 절대 경로로 바꿈 (bash 3.2에 realpath 없음)
+  csv1="$(cd "$(dirname "$csv1")" && pwd)/$(basename "$csv1")"
+  csv2="$(cd "$(dirname "$csv2")" && pwd)/$(basename "$csv2")"
   [ -e "$RUN_DIR/pids" ] && die "이전 실행이 남아 있음. 먼저 harness.sh stop"
 
   local busy=()
