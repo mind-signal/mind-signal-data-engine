@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # Proxy 연동 (engine-proxy-sync Phase 18)
     proxy_url: str | None = None  # env PROXY_URL
     alignment_location: Literal["be", "proxy"] = "be"  # env ALIGNMENT_LOCATION
+    # env MESSAGE_BUS — redis(기본) 또는 memory. 값 검사는 아래
+    # validate_message_bus가 서버 기동(lifespan)과 스트리머 생성 시점에 수행함.
+    # Literal로 두지 않는 이유는 import 시점의 pydantic 오류 대신 원인을 적은
+    # 메시지로 멈추기 위함임
+    message_bus: str = "redis"
     proxy_reregister_interval_sec: int = (
         20  # env PROXY_REREGISTER_INTERVAL_SEC — TTL 만료 전 재등록 주기(초)
     )
@@ -51,7 +56,48 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env.local"
         env_file_encoding = "utf-8"
+        # 빈 값(`DUAL_2PC_SUBJECT_INDEX=`)을 미설정으로 취급함. core/main.py와 같은
+        # 해석이며, 없으면 int | None 검증 오류로 서버가 1인 memory 분기에 못 감
+        env_ignore_empty = True
         extra = "ignore"  # .env.local의 미정의 변수 무시함
 
 
 settings = Settings()
+
+
+class MessageBusConfigError(ValueError):
+    """MESSAGE_BUS 설정이 측정을 시작할 수 없는 조합일 때 raise되는 예외임"""
+
+
+def validate_message_bus(
+    message_bus: str, alignment_location: str, proxy_url: str | None
+) -> None:
+    """메시지 버스 설정 조합을 검사함. redis는 기존 동작 그대로라 통과함.
+
+    memory는 샘플과 경보를 프록시로만 보내므로 프록시 설정이 빠지면 샘플이
+    갈 곳이 없음. 조용히 버리지 않고 측정 시작 전에 멈추게 함.
+
+    Args:
+        message_bus: MESSAGE_BUS 값임 (redis 또는 memory)
+        alignment_location: ALIGNMENT_LOCATION 값임
+        proxy_url: PROXY_URL 값임
+
+    Raises:
+        MessageBusConfigError: 알 수 없는 값이거나 memory인데 프록시 설정이 없을 때
+    """
+    if message_bus == "redis":
+        return
+    if message_bus != "memory":
+        raise MessageBusConfigError(
+            f"MESSAGE_BUS={message_bus!r}는 지원하지 않음. redis 또는 memory만 가능함"
+        )
+    if alignment_location != "proxy":
+        raise MessageBusConfigError(
+            "MESSAGE_BUS=memory는 ALIGNMENT_LOCATION=proxy가 필요함 "
+            f"(현재 {alignment_location!r}). Redis 없이는 샘플을 프록시로만 보낼 수 있음"
+        )
+    if not proxy_url:
+        raise MessageBusConfigError(
+            "MESSAGE_BUS=memory는 PROXY_URL이 필요함 (현재 비어 있음). "
+            "예: PROXY_URL=http://127.0.0.1:5050"
+        )

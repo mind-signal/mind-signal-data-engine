@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from core.streamer import MindSignalStreamer
+from server.config import MessageBusConfigError
 
 # 환경 변수 로드 수행함
 load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
@@ -45,25 +46,42 @@ def main():
     )
     proxy_fail_closed_threshold_ms = int(os.getenv("FAIL_CLOSED_THRESHOLD_MS", "3000"))
 
+    # 메시지 버스 선택함. 빈 값은 미설정과 같이 redis로 취급함 (기존 동작)
+    message_bus = os.getenv("MESSAGE_BUS") or "redis"
+    # memory 버스의 1인 측정(DUAL_2PC 설정 없음)은 프록시 장애로 측정을 끊지 않음.
+    # be 모드가 Redis publish 실패에 경고만 남기고 CSV를 계속 쓰던 동작을 유지함.
+    # DUAL_2PC와 redis 버스의 fail-closed는 그대로임. server/app.py의 1인 판별과 같음
+    solo = not os.getenv("DUAL_2PC_GROUP_ID") and not os.getenv(
+        "DUAL_2PC_SUBJECT_INDEX"
+    )
+    proxy_fail_closed = not (message_bus == "memory" and solo)
+
     print(f"Mind Signal Engine 구동 시작함 (Group: {group_id}, Index: {subject_index})")
     print(
         f"[INFO] 헤드셋 동적 선택: Cortex가 보고한 첫 헤드셋을 subject {subject_index}로 사용함"
     )
 
     # 스트리머 인스턴스 생성 및 실행 수행함
-    streamer = MindSignalStreamer(
-        group_id,
-        subject_index,
-        client_id,
-        client_secret,
-        headset_id=headset_id,
-        alignment_location=alignment_location,
-        proxy_url=proxy_url,
-        engine_secret_key=engine_secret_key,
-        max_proxy_post_retries=max_proxy_post_retries,
-        proxy_health_poll_interval_sec=proxy_health_poll_interval_sec,
-        proxy_fail_closed_threshold_ms=proxy_fail_closed_threshold_ms,
-    )
+    try:
+        streamer = MindSignalStreamer(
+            group_id,
+            subject_index,
+            client_id,
+            client_secret,
+            headset_id=headset_id,
+            alignment_location=alignment_location,
+            proxy_url=proxy_url,
+            engine_secret_key=engine_secret_key,
+            max_proxy_post_retries=max_proxy_post_retries,
+            proxy_health_poll_interval_sec=proxy_health_poll_interval_sec,
+            proxy_fail_closed_threshold_ms=proxy_fail_closed_threshold_ms,
+            message_bus=message_bus,
+            proxy_fail_closed=proxy_fail_closed,
+        )
+    except MessageBusConfigError as e:
+        # 측정 시작 전에 원인을 알리고 멈춤. 샘플을 조용히 버리지 않기 위함임
+        print(f"[ERROR] {e}")
+        sys.exit(1)
     streamer.open()
 
 

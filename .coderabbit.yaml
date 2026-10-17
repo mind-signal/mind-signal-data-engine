@@ -13,6 +13,26 @@ reviews:
       - dev
   ignore_formatting: true
   path_instructions:
+    - path: "**"
+      instructions: |
+        확정된 설계 결정이다. 아래를 되돌리라는 제안은 하지 말 것 — 근거는
+        계획 문서에 있으나 그 문서는 git 밖이라 이 레포에서 확인할 수 없다.
+
+        - sdk/ 는 Emotiv 제공 원본이라 절대 수정 금지(AGENTS.md 참조).
+          sdk/cortex.py 의 print 문과 이모지(U+274C)는 알려진 상태이며 그대로 둔다.
+          cp949 UnicodeEncodeError 위험은 run_server.py 가 PYTHONIOENCODING=utf-8 을
+          주입하고 core.main 자식 프로세스가 이를 상속해 이미 막혀 있다.
+          core.main 은 server/services/stream.py 에서만 spawn 되고 직접 실행 경로는 없다.
+        - Cortex 자동 재연결은 기각됐다. 세션과 구독과 버퍼 중복 위험 때문이며
+          수동 복구 경로가 동작함을 확인했다. 자동 재연결 도입을 제안하지 말 것.
+        - baseline_valid_seconds 필드 추가는 기각됐다. 소비자가 없다.
+        - baseline 유효초 교집합 hard gate 는 기각됐다. 정상 측정을 거부한다.
+        - 새 hard threshold 추가 금지. 라이브 표본이 부족해 값을 정할 근거가 없다.
+        - DUAL 은 두 의미다. 측정 "모드"로서의 DUAL 은 제거됐지만 파이프라인
+          라벨로서의 DUAL 은 보존한다. 라벨 제거를 제안하지 말 것.
+        - subject_index 는 1-based 다(유효값 1 과 2). 0-based 로 바꾸라고 하지 말 것.
+        - 감마 대역 30~45Hz 는 의도된 값이다. Emotiv Cortex 표기(25~45)와 다른 것은
+          IFCN 권고 하한과 근전도 오염 회피 근거에 따른 것이며 Cortex 산출값은 쓰지 않는다.
     - path: "**/*.py"
       instructions: |
         1. Fail-Fast 원칙: 예외를 조용히 넘기지(bare except/pass) 않고 명시적으로 raise하는지 확인.
@@ -26,3 +46,18 @@ reviews:
         포매팅 무시.
 chat:
   auto_reply: true
+
+# --- 2026-08-27 추가: 프로젝트 컨텍스트 학습 ---
+# 배경: 기본 code_guidelines 패턴은 CLAUDE.md 를 읽는데 이 레포의 CLAUDE.md 는
+# `@AGENTS.md` 한 줄짜리 import 껍데기라 실질적으로 빈 파일이었다. CodeRabbit 이
+# AGENTS.md 의 "sdk/ 절대 수정 금지"(AGENTS.md:54)를 모른 채 sdk/cortex.py 수정을
+# critical 로 지적한 것이 실측 계기다. import 는 따라가지 않으므로 직접 가리킨다.
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # 문자열 항목은 규칙 파일이 있는 폴더 아래에만 적용됨. .agents/rules/ 는
+    # 코드 폴더 밖이라 applyTo 로 저장소 전체에 적용함 (CodeRabbit PR #69)
+    filePatterns:
+      - "AGENTS.md"
+      - files: ".agents/rules/*.md"
+        applyTo: "**"

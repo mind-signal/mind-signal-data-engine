@@ -10,11 +10,17 @@ import pandas as pd
 from core.analyzer import MindSignalAnalyzer
 from server.services.friendship import compute_friendship_score
 from server.services.score_params import ScoreParams
+from server.services.session_csv import (
+    METRIC_COLUMNS,
+    SESSION_CSV_DIR,
+    WAVE_COLUMNS,
+    session_csv_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
 # CSV 저장 기본 경로 (streamer.py와 동일한 위치)
-CSV_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "csv"
+CSV_BASE_DIR = SESSION_CSV_DIR
 
 # 구간 상수의 정본은 ScoreParams임. 아래 세 이름은 하위 호환 별칭이며
 # **import 시점 스냅샷**이라 이후의 환경변수 변경을 반영하지 않음.
@@ -119,7 +125,7 @@ def compute_baseline_from_warmup(
 
 def find_csv_files(group_id: str, subject_index: int) -> list[Path]:
     """특정 그룹/피실험자의 CSV 파일을 검색함"""
-    pattern = f"subject_{subject_index}_{group_id}_*.csv"
+    pattern = session_csv_pattern(group_id, subject_index)
     return sorted(
         CSV_BASE_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True
     )
@@ -132,15 +138,8 @@ def load_session_data(csv_path: Path) -> pd.DataFrame:
 
 def compute_subject_summary(df: pd.DataFrame) -> dict:
     """단일 피실험자의 세션 요약 통계를 계산함 (trimming 적용)"""
-    metric_cols = [
-        "focus",
-        "engagement",
-        "interest",
-        "excitement",
-        "stress",
-        "relaxation",
-    ]
-    wave_cols = ["delta", "theta", "alpha", "beta", "gamma"]
+    metric_cols = list(METRIC_COLUMNS)
+    wave_cols = list(WAVE_COLUMNS)
 
     total_samples = len(df)
     tier = classify_session_tier(total_samples)

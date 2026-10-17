@@ -2,6 +2,8 @@ from collections import defaultdict
 
 import pandas as pd
 
+from server.services.session_csv import METRIC_COLUMNS, WAVE_COLUMNS
+
 
 def dataframe_to_markdown(dataframes: dict[int, pd.DataFrame]) -> str:
     """복수의 DataFrame을 LLM용 Markdown 텍스트로 변환함"""
@@ -11,15 +13,8 @@ def dataframe_to_markdown(dataframes: dict[int, pd.DataFrame]) -> str:
         sections.append(f"## Subject {subject_idx}")
 
         # 요약 통계 테이블 생성함
-        metric_cols = [
-            "focus",
-            "engagement",
-            "interest",
-            "excitement",
-            "stress",
-            "relaxation",
-        ]
-        wave_cols = ["delta", "theta", "alpha", "beta", "gamma"]
+        metric_cols = list(METRIC_COLUMNS)
+        wave_cols = list(WAVE_COLUMNS)
 
         available_metrics = [c for c in metric_cols if c in df.columns]
         available_waves = [c for c in wave_cols if c in df.columns]

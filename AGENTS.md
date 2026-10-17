@@ -1,6 +1,6 @@
 # AGENTS.md — Mind Signal Data Engine (Python)
 
-모든 에이전트(Claude Code / Codex CLI / 기타 모델)가 이 프로젝트에서 작업할 때 반드시 읽어야 할 공통 지시. Claude 전용 메타는 `CLAUDE.md` 참조.
+모든 에이전트(Claude Code / Codex CLI / 기타 모델)가 이 프로젝트에서 작업할 때 반드시 읽어야 할 공통 지시. 세부 규칙은 `.agents/rules/`의 code-style.md, commit-conventions.md, redis-contract.md, troubleshooting.md, verification-loop.md, analysis-contract.md이며 작업 전에 직접 연다.
 
 > 본 문서는 자가완결 — 이 레포 클론만으로 개발·검증·커밋이 가능해야 함. 상세는 `.agents/rules/*.md` 참조 (단방향: 본문이 1차 소스). 예외: 아래 "계획 산출물 위치" 절의 `.plans/` 정본 파일들은 상위 워크스페이스(`Team-project/mind-signal/.plans/`)에 있는 팀 작업 맥락 참조용이라 이 레포 클론에는 없을 수 있음 — 판단에 필요한 요지는 그 절 본문에 남겨둠.
 
@@ -41,7 +41,7 @@ mind-signal-data-engine/
 
 ## 4. 환경 변수
 
-`.env.local`에는 `CLIENT_ID`, `CLIENT_SECRET`, `REDIS_HOST`, `REDIS_PORT`, `FASTAPI_PORT`, `USE_NGROK`, `BACKEND_URL`, `ENGINE_SECRET_KEY`가 필요함. Redis 채널 자체는 `core.main`의 위치 인수(groupId, subjectIndex)로 결정되며 환경변수와 무관.
+`.env.local`에는 `CLIENT_ID`, `CLIENT_SECRET`, `REDIS_HOST`, `REDIS_PORT`, `FASTAPI_PORT`, `USE_NGROK`, `BACKEND_URL`, `ENGINE_SECRET_KEY`가 필요함. Redis 채널 자체는 `core.main`의 위치 인수(groupId, subjectIndex)로 결정되며 환경변수와 무관. `MESSAGE_BUS`(기본 `redis`)를 `memory`로 두면 Redis 없이 샘플과 헤드셋 상태 경보를 프록시로 보내며, 이때 `ALIGNMENT_LOCATION=proxy`와 `PROXY_URL`이 필요함 — 상세는 `.agents/rules/redis-contract.md`의 `MESSAGE_BUS=memory` 절.
 
 머신마다 반복되는 환경 함정이 둘 있다: Cortex TLS 루트 인증서는 gitignore 대상이라 새 머신마다 손으로 복사해야 하고, `LAN_IP` 해석에는 Tailscale이 개입할 때 지켜야 할 우선순위가 있다. 둘 다 `.agents/rules/troubleshooting.md`에 상세 — "헤드셋은 찾았는데 세션이 즉시 끝남" 또는 "operator가 이 엔진에 도달 못함" 증상을 디버깅하기 전에 먼저 읽을 것.
 
@@ -82,7 +82,19 @@ pytest        # 단위 테스트 (tests/)
 
 형식: `{type}({scope}): {description}`. 허용 type: `feat fix refactor style docs chore test perf ci revert`.
 
-1 task = 1 commit. `main` 직접 커밋 금지 — `feat/{domain-wNNN}-{slug}`(Work ID 스타일, 예: `feat/analysis-w005-band-power-fix`)로 브랜치해 `dev`로 PR, 이후 `dev`를 `main`으로 PR.
+1 task = 1 commit. `main` 직접 커밋 금지 — 작업 브랜치를 만들어 `dev`로 PR, 이후 `dev`를 `main`으로 PR.
+
+브랜치 이름(제품 공통 규칙. 정본은 `mind-signal/.plans/README.md`의 「브랜치 이름」 절, 상세는 `.agents/rules/commit-conventions.md`):
+
+- 작업이 등록된 Work의 범위와 완료 조건에 들어가면 유형과 관계없이 `{type}/{work-id}-{slug}`를 쓴다. `{work-id}`는 Work ID 전체의 소문자다(예: `fix/ops-w010-t7-preflight`). Work ID의 뜻은 이 문서의 「Work ID 읽는 법」에 있다.
+- Work에 속하지 않는 작업은 `{type}/{slug}` 또는 `{type}/{이슈번호}-{slug}`를 쓴다(형식 예: `fix/readme-link`, `fix/123-readme-link`). 이슈 번호 앞의 `#`은 적어도 되고 생략해도 된다.
+- Work에 속한 브랜치에는 이슈 번호를 Work ID 대신 쓰지 않는다.
+- 브랜치 하나에는 Work 하나만 담는다. 여러 Work를 구현하면 Work마다 브랜치를 나눈다.
+- 종결된 Work의 ID는 새 브랜치에 쓰지 않는다. 종결된 Work의 결과를 고치는 작업에 새 Work ID를 전달받았으면 그 ID를 쓴다. 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다.
+- `{type}`은 작업의 최종 목적에 맞는 커밋 유형이다. 운영 긴급 수정에는 `{type}` 자리에 `hotfix`도 쓰며 형식은 다른 유형과 같다.
+- `{slug}`는 영문 소문자, 숫자, 하이픈으로 쓴다.
+- 계획판(`mind-signal/.plans/`)에 접근할 수 없으면 전달받은 Work ID와 작업 범위로 판단한다. Work ID를 전달받지 못했으면 Work에 속하지 않는 작업의 형식을 쓴다.
+- 이미 만든 브랜치는 개명하지 않는다. 브랜치를 만든 뒤 Work 소속이 바뀌면 PR 본문에 적는다.
 
 모든 커밋 끝에 아래를 고정 작성(`noreply` 금지, Claude co-author 줄 금지):
 
@@ -115,15 +127,15 @@ Co-authored-by: KWONSEOK02 <gwonseok02@gmail.com>
 
 ## 계획 산출물 위치 (2026-07-31 갱신, DOCS-W005)
 
-mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나, `Team-project/mind-signal/.plans/`에 둔다. **이 정본 파일들은 이 레포 밖(상위 워크스페이스)에 있으므로, 이 레포만 클론한 환경에서는 접근할 수 없을 수 있다** — 그런 환경에서는 아래 요지만으로 판단하고, 실제 `.plans/` 조작이 필요하면 상위 워크스페이스 접근이 별도로 필요함을 알 것. 이 레포의 로컬 `.plans/`(git 밖)는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 담는다 — 여기에 작업 폴더를 새로 만들지 말 것.
+MindSignal은 여러 저장소로 된 제품이므로 `.plans/`는 제품 단위로 딱 하나, `Team-project/mind-signal/.plans/`에 둔다. **이 정본 파일들은 이 레포 밖(상위 워크스페이스)에 있으므로, 이 레포만 클론한 환경에서는 접근할 수 없을 수 있다** — 그런 환경에서는 아래 요지만으로 판단하고, 실제 `.plans/` 조작이 필요하면 상위 워크스페이스 접근이 별도로 필요함을 알 것. 이 레포의 로컬 `.plans/`(git 밖)는 세션 로그(`_logs/`)와 임시 조사(`_quick/`)만 담는다 — 여기에 작업 폴더를 새로 만들지 말 것.
 
 `Team-project/.plans/`(루트)와 혼동하지 말 것 — 그쪽은 2026-07-30 통합 이후 크로스 프로젝트 메타 전용이고, 폴더에 번호가 붙어 있어도 MindSignal 계획은 없다.
 
-판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인(`ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS`)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
+판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인 접두사(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
 
 - 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
-- ID·상태 규칙 정본: `mind-signal/.plans/README.md` (v1.3, **LOCK**)
+- ID·상태·브랜치 이름 규칙 정본: `mind-signal/.plans/README.md`
 - 소급 Work ID 매핑: `mind-signal/.plans/LEGACY-REGISTRY.md`
 - 작업 폴더: `mind-signal/.plans/{WORK-ID}[-{slug}]` (예: `ANALYSIS-W001-eeg-dc-offset-removal`)
 - 상태 서술: `mind-signal/.plans/STATE.md`
@@ -131,4 +143,4 @@ mind-signal은 4레포 제품이므로 `.plans/`는 제품 단위로 딱 하나,
 
 ### Work ID 읽는 법 (흔한 오독)
 
-폴더 접두사는 `{domain}-W{NNN}`이며 **도메인별로 채번**한다(`ANALYSIS`, `EEG`, `SESSION`, `OPS`, `DOCS`) — 전역 순번이 아니다. 신규는 W001부터, 소급은 W101부터 시작하므로 `SESSION-W114`는 전체 114번째가 아니라 소급 14번째 SESSION 항목이다. 번호는 영구적이며 재사용되지 않는다 — 공백은 오류가 아니라 역사다. `project-flow` 스킬의 범용 `{NN}-{feature-name}` 규칙은 여기 적용되지 않는다 — `.plans/README.md`의 로컬 선언이 우선한다.
+폴더 접두사는 `{domain}-W{NNN}`이며 **도메인별로 채번**한다(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리) — 전역 순번이 아니다. 신규는 W001부터, 소급은 W101부터 시작하므로 `SESSION-W114`는 전체 114번째가 아니라 소급 14번째 SESSION 항목이다. 번호는 영구적이며 재사용되지 않는다 — 공백은 오류가 아니라 역사다. `project-flow` 스킬의 범용 `{NN}-{feature-name}` 규칙은 여기 적용되지 않는다 — `.plans/README.md`의 로컬 선언이 우선한다.

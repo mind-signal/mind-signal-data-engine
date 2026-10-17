@@ -48,3 +48,28 @@ def test_upload_csv_missing_file_soft_fail(tmp_path) -> None:
     """파일이 없으면 raise 안 하고 False 반환함"""
     ok = upload_csv_to_backend(MOCK_BACKEND_URL, str(tmp_path / "nope.csv"), SECRET)
     assert ok is False
+
+
+def test_upload_csv_non_utf8_bytes_does_not_raise(
+    httpx_mock: HTTPXMock, tmp_path
+) -> None:
+    """UTF-8로 디코딩 불가한 CSV여도 raise 안 하고 바이트 그대로 전송함.
+
+    회귀 재현 — 왕복 인코딩(텍스트로 읽고 다시 encode) 구현에서는
+    UnicodeDecodeError가 발생하고, 그것은 ValueError 계열이라
+    soft-fail의 except (httpx.HTTPError, OSError)를 뚫고 측정 종료 흐름을 깬다.
+    """
+    csv = tmp_path / FILENAME
+    # cp949로 인코딩된 한글 — UTF-8 디코딩 시 UnicodeDecodeError 발생함
+    csv.write_bytes("time,alpha\n측정,0.3\n".encode("cp949"))
+
+    httpx_mock.add_response(method="POST", status_code=200, json={"status": "success"})
+
+    ok = upload_csv_to_backend(MOCK_BACKEND_URL, str(csv), SECRET)
+
+    assert ok is True
+    req = httpx_mock.get_request()
+    assert req is not None
+    # 바이트가 변형 없이 그대로 실려야 함
+    assert req.content == csv.read_bytes()
+    assert req.headers["Content-Type"] == "text/csv"

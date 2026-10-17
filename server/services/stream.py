@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import IO, Any
 
+from server.services.session_csv import SESSION_CSV_DIR, session_csv_pattern
+
 # 엔진 루트 디렉토리 (stream.py → server/services/ → server/ → engine root)
 _ENGINE_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
@@ -17,7 +19,8 @@ _LOG_DIR = Path(_ENGINE_ROOT) / "logs"
 # streamer.py는 core/ 아래, 이 파일은 server/services/ 아래라 동일한 parent×3이 서로
 # 다른 폴더를 가리킴. 여기서 _ENGINE_ROOT(레포 루트)/csv 대신 그 부모/csv를 봐야
 # core.main이 실제로 쓴 원격 subject CSV를 찾음 (경로 불일치로 업로드 skip되던 것 정합).
-_CSV_DIR = str(Path(_ENGINE_ROOT).parent / "csv")
+# 경로 계산은 session_csv.SESSION_CSV_DIR이 함. 테스트가 교체하므로 이름은 유지함
+_CSV_DIR = str(SESSION_CSV_DIR)
 
 # 실행 중인 스트리밍 프로세스 추적 dict — key: "{group_id}:{subject_index}"
 _processes: dict[str, subprocess.Popen] = {}
@@ -55,7 +58,7 @@ def _upload_subject_csv(group_id: str, subject_index: int) -> None:
     # group_id는 glob.escape로 감싸 *,?,[ 메타문자 오매칭 방지함 (CodeRabbit)
     pattern = os.path.join(
         _CSV_DIR,
-        f"subject_{subject_index}_{glob.escape(group_id)}_*.csv",
+        session_csv_pattern(group_id, subject_index, escape_group_id=True),
     )
     matches = sorted(glob.glob(pattern), key=os.path.getmtime)
     if not matches:

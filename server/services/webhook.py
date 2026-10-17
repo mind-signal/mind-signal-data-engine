@@ -186,7 +186,10 @@ def upload_csv_to_backend(
     """
     filename = os.path.basename(csv_path)
     try:
-        with open(csv_path, "r", encoding="utf-8") as f:
+        # 바이트 직송함 — 텍스트로 읽고 다시 encode 하는 왕복은 UTF-8 디코딩 불가
+        # CSV에서 UnicodeDecodeError(ValueError 계열)를 내어 아래 soft-fail except를
+        # 뚫고 측정 종료 흐름을 깸
+        with open(csv_path, "rb") as f:
             content = f.read()
         with httpx.Client(timeout=timeout) as client:
             response = client.post(
@@ -196,7 +199,7 @@ def upload_csv_to_backend(
                     "X-Engine-Secret": secret_key,
                     "Content-Type": "text/csv",
                 },
-                content=content.encode("utf-8"),
+                content=content,
             )
             response.raise_for_status()
         print(f"[csv-upload] {filename} 업로드 완료")
