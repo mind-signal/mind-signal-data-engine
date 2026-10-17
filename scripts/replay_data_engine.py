@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
 import httpx
 import uvicorn
@@ -153,13 +154,25 @@ def csv_out_row(
     ]
 
 
+class Envelope(TypedDict):
+    """프록시 /ingest/sample 본문 계약 (proxy_client.post_sample과 같음)."""
+
+    group_id: str
+    subject_idx: int
+    de_ts_ns: str
+    seq: int
+    payload: dict[str, float]
+    sync_meta: dict[str, str]
+    metrics: dict[str, float]
+
+
 def build_envelope(
     group_id: str,
     subject_idx: int,
     seq: int,
     payload: dict[str, float],
     metrics: dict[str, float],
-) -> dict:
+) -> Envelope:
     """프록시 /ingest/sample envelope을 만듦 (proxy_client.post_sample과 같은 본문).
 
     de_ts_ns는 여기서 한 번만 찍음. 실제 엔진처럼 재시도와 재전송이 같은
@@ -189,7 +202,7 @@ def build_envelope(
 def _post_envelope(
     proxy_url: str,
     secret: str,
-    body: dict,
+    body: Envelope,
     backoffs_sec: tuple[float, ...] = (0.1, 0.2),
 ) -> None:
     """envelope을 /ingest/sample로 보냄. post_sample처럼 같은 본문으로 재시도함.
@@ -526,6 +539,14 @@ def create_app(cfg: ReplayConfig) -> FastAPI:
     return app
 
 
+def _non_negative_int(value: str) -> int:
+    """argparse 형 검사: 0 이상의 정수만 받음."""
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"0 이상의 정수여야 함: {value}")
+    return n
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """CLI 인자를 해석해 반환함."""
     p = argparse.ArgumentParser(
@@ -561,7 +582,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-rows",
-        type=int,
+        type=_non_negative_int,
         default=0,
         help="재생할 CSV 행 수 상한 (0=전부). 등급 VALID 판정에는 200 이상",
     )

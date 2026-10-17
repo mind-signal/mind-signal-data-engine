@@ -364,7 +364,19 @@ def run(args: argparse.Namespace) -> dict:
     if args.natural:
         # 자연 종료: 엔진이 CSV를 올리면 BE가 스스로 끝내야 함. stop-all 안 부름
         log(f"측정 시작. 자연 종료를 최대 {args.duration_sec + 120}초 기다림")
-        _wait(lambda: sock.named("measurement-complete"), args.duration_sec + 120)
+        if not _wait(
+            lambda: sock.named("measurement-complete"), args.duration_sec + 120
+        ):
+            # 시간 초과: 판정은 measurement_complete 실패로 남고, 다음 실행이
+            # 막히지 않게 남은 스트림을 정리함
+            log("자연 종료 시간 초과. stop-all(ProcessError)로 스트림을 정리함")
+            stop = d.call(
+                "POST",
+                "/api/engine/stream/stop-all",
+                op,
+                json={"groupId": group_id, "stopReason": "ProcessError"},
+            )
+            log(f"stop-all: {stop}")
     else:
         log(f"측정 시작. {args.duration_sec}초 대기함")
         time.sleep(args.duration_sec)

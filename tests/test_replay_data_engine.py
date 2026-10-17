@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from fastapi.testclient import TestClient
@@ -67,6 +67,16 @@ def _cfg(tmp_path: Path, src: Path, **over: Any) -> Any:
     )
     kwargs.update(over)
     return rde.ReplayConfig(**kwargs)
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """predicate가 참이 될 때까지 최대 timeout초 기다림. 시간 초과면 False."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 def test_header_matches_engine_column_order():
@@ -265,16 +275,23 @@ def test_stop_after_natural_end_matches_real_engine(
 
     with TestClient(app) as client:
         client.post("/api/stream/start", json=body, headers=headers)
-        time.sleep(0.3)  # 재생과 자연 종료 업로드가 끝나도록 기다림
-        assert uploads() == 1
+        assert _wait_until(lambda: uploads() == 1)  # 재생과 자연 종료 업로드
         assert client.post("/api/stream/stop", json=body, headers=headers).json()[
             "uploaded"
         ]
         assert uploads() == 2
 
         client.post("/api/stream/start", json=body, headers=headers)
-        time.sleep(0.3)
+        assert _wait_until(lambda: uploads() == 3)
         assert client.get("/health").json()["streaming"] is False
         stop = client.post("/api/stream/stop", json=body, headers=headers)
         assert stop.status_code == 404
         assert uploads() == 3
+
+
+def test_max_rows_rejects_negative(tmp_path: Path):
+    """--max-rows 음수는 실행 전에 거부함."""
+    base = ["--subject-index", "1", "--port", "5011", "--csv", str(tmp_path / "a.csv")]
+    assert rde._parse_args([*base, "--max-rows", "0"]).max_rows == 0
+    with pytest.raises(SystemExit):
+        rde._parse_args([*base, "--max-rows", "-1"])

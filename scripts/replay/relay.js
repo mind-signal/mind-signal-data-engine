@@ -119,6 +119,8 @@ function main() {
       auth: socket.handshake.auth,
       reconnection: false,
     });
+    // 미들웨어 처리 중에 프록시가 끊기면 connection이 오지 않으므로 여기서도 업스트림을 닫음
+    socket.conn.once('close', () => up.close());
     up.once('connect', () => {
       socket.data.up = up;
       next();
