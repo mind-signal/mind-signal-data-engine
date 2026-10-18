@@ -148,7 +148,7 @@ uvicorn.run(app, host="127.0.0.1", port=int(os.environ["FASTAPI_PORT"]))
     wait_port "$port" "replay$i"
   done
   echo "[harness] 기동 완료 (MESSAGE_BUS=$bus). 로그: $RUN_DIR"
-  echo "[harness] 드라이버: $PYTHON $ENGINE_DIR/scripts/replay_driver.py --csv-dir $CSV_DIR --log-dir $RUN_DIR"
+  echo "[harness] 드라이버: $PYTHON $ENGINE_DIR/scripts/replay_driver.py --csv-dir $CSV_DIR --log-dir \"$RUN_DIR\""
 }
 
 cmd_stop() {

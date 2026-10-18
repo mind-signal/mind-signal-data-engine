@@ -204,9 +204,10 @@ def _read_log(path: Path, missing_note: str = "") -> tuple[str | None, str]:
 
     로그에 한국어가 있어 Windows 기본 로케일(cp949)로 읽으면 요약 줄이 깨짐.
     """
-    if not path.is_file():
-        return None, f"{path} 없음{missing_note}"
     try:
+        # Python 3.10의 is_file()은 권한이 없으면 OSError를 냄
+        if not path.is_file():
+            return None, f"{path} 없음{missing_note}"
         return path.read_text(encoding="utf-8", errors="replace"), ""
     except OSError as e:
         return None, f"{path} 읽기 실패: {e}"
