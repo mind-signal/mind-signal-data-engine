@@ -16,6 +16,7 @@
 
 import argparse
 import json
+import re
 import secrets
 import sys
 import threading
@@ -27,9 +28,20 @@ from urllib.parse import urlparse
 import httpx
 import websocket
 
-# PLAN 6.4절의 임시 기준값임. 첫 실행 결과로 다시 정함
-MIN_PAIRED_RATIO = 0.9
-MAX_SINGLE_RATIO = 0.1
+# 판정 기준값임 (OPS-W019 7절, 2026-10-18 재설정). 첫 기준 0.9, 0.1과 분모
+# min(rows)는 재전송 결함 회차(run3, EEG-W007 t5 1차: 쌍 201, 단독 20/221)를
+# 통과시켰음. 지금은 분모를 max(rows)로 두고 subject별 손실(보낸 행 - 쌍 - 단독)을
+# 0으로 요구함. 단독 0.02는 202행 기준 약 4건으로 양 끝 몇 행의 단독만 허용함
+MIN_PAIRED_RATIO = 0.98
+MAX_SINGLE_RATIO = 0.02
+MAX_ABS_LOSS = 0
+# 백엔드 [/proxy] summary 창(PROXY_SUMMARY_INTERVAL_MS 10초)이 측정 뒤 한 번 더
+# 찍힐 때까지 기다리는 시간임
+LOG_SETTLE_SEC = 11
+_BACKEND_SUMMARY = re.compile(
+    r"\[/proxy\] summary subject=(\d+) .*?duplicate=(\d+) in_flight=(\d+)"
+)
+_RELAY_SUMMARY = re.compile(r"\[relay\] 전달 (\d+), 지연 (\d+), 중복 (\d+)")
 
 
 class SocketRecorder:
@@ -142,6 +154,49 @@ def count_csv_rows(csv_dir: Path, group_id: str, subject_index: int) -> int:
         return max(0, sum(1 for _ in f) - 1)
 
 
+def read_harness_counts(log_dir: Path | None) -> dict:
+    """하네스 로그에서 백엔드 중복 거름 수와 중계기 중복 수를 읽음.
+
+    백엔드 요약은 10초 창마다 0으로 되돌리므로 subject별로 더하고, 중계기 요약은
+    누적값이라 마지막 줄을 씀. 읽지 못한 항목은 None으로 두고 이유를 남김.
+
+    Args:
+        log_dir: harness.sh의 RUN_DIR (backend.log, relay.log가 있는 폴더).
+
+    Returns:
+        backend(subject별 duplicate, in_flight 합), relay(forwarded, delayed,
+        duplicated)와 읽지 못한 항목의 *_reason을 담은 dict.
+    """
+    result: dict = {"backend": None, "relay": None}
+    if log_dir is None:
+        result["backend_reason"] = result["relay_reason"] = "--log-dir 미지정"
+        return result
+    backend_log = log_dir / "backend.log"
+    if backend_log.is_file():
+        backend: dict[str, dict[str, int]] = {}
+        for m in _BACKEND_SUMMARY.finditer(backend_log.read_text(errors="replace")):
+            t = backend.setdefault(m[1], {"duplicate": 0, "in_flight": 0})
+            t["duplicate"] += int(m[2])
+            t["in_flight"] += int(m[3])
+        if backend:
+            result["backend"] = dict(sorted(backend.items()))
+        else:
+            result["backend_reason"] = "backend.log에 [/proxy] summary 줄 없음"
+    else:
+        result["backend_reason"] = f"{backend_log} 없음"
+    relay_log = log_dir / "relay.log"
+    if relay_log.is_file():
+        found = _RELAY_SUMMARY.findall(relay_log.read_text(errors="replace"))
+        if found:
+            f, d, dup = (int(x) for x in found[-1])
+            result["relay"] = {"forwarded": f, "delayed": d, "duplicated": dup}
+        else:
+            result["relay_reason"] = "relay.log에 요약 줄 없음"
+    else:
+        result["relay_reason"] = f"{relay_log} 없음 (중계기 미사용 실행)"
+    return result
+
+
 def judge(
     pairs: list[dict],
     rows: dict[int, int],
@@ -153,7 +208,11 @@ def judge(
     stop_reasons: list[str | None] | None = None,
     complete_stop_reasons: list[str | None] | None = None,
 ) -> dict:
-    """PLAN 6.4절 판정 4개를 계산함. natural이면 자연 종료 판정 2개를 더함.
+    """PLAN 6.4절 판정 4개와 subject별 계수 판정을 계산함.
+
+    natural이면 자연 종료 판정 2개를 더함. 계수 판정은 subject마다 보낸 행(재생
+    CSV 행)에서 양쪽 쌍과 그 subject만 있는 단독을 뺀 손실이 0인지 봄. 손실이
+    양수면 emit 누락, 음수면 중복 emit임.
 
     Args:
         pairs: 받은 aligned_pair 데이터 목록.
@@ -173,7 +232,19 @@ def judge(
     """
     both = sum(1 for p in pairs if p.get("subject_1") and p.get("subject_2"))
     single = len(pairs) - both
-    replay_rows = min(rows.values()) if rows else 0
+    subjects = {}
+    for i, sent in sorted(rows.items()):
+        mine, other = f"subject_{i}", f"subject_{3 - i}"
+        alone = sum(1 for p in pairs if p.get(mine) and not p.get(other))
+        subjects[str(i)] = {
+            "sent": sent,
+            "paired": both,
+            "single": alone,
+            "loss": sent - both - alone,
+        }
+    # 분모를 많이 보낸 쪽으로 둬 한쪽 손실이 가려지지 않게 함. 쌍 상한은 적게 보낸 쪽
+    replay_rows = max(rows.values()) if rows else 0
+    pair_cap = min(rows.values()) if rows else 0
     paired_ratio = both / replay_rows if replay_rows else 0.0
     single_ratio = single / len(pairs) if pairs else 1.0
     # SESSION-W008 전의 BE는 VALID 등급을 알리지 않음. DUAL 분석 결과가 있고
@@ -182,9 +253,12 @@ def judge(
     bad_tiers = [t for t in tiers if t in ("PARTIAL", "ABORTED")]
     result = {
         "aligned_pairs": {
-            "pass": replay_rows > 0 and paired_ratio >= MIN_PAIRED_RATIO,
+            "pass": replay_rows > 0
+            and both <= pair_cap
+            and paired_ratio >= MIN_PAIRED_RATIO,
             "both": both,
             "replay_rows": rows,
+            "pair_cap": pair_cap,
             "ratio": round(paired_ratio, 4),
         },
         "single_emit": {
@@ -192,6 +266,11 @@ def judge(
             "single": single,
             "total": len(pairs),
             "ratio": round(single_ratio, 4),
+        },
+        "accounting": {
+            "pass": bool(subjects)
+            and all(abs(c["loss"]) <= MAX_ABS_LOSS for c in subjects.values()),
+            "subjects": subjects,
         },
         "measurement_complete": {
             "pass": complete_events == 1
@@ -402,6 +481,7 @@ def run(args: argparse.Namespace) -> dict:
         tiers = [e.get("tier") for e in sock.named("analysis-status")]
         return ("PARTIAL" in tiers or "ABORTED" in tiers) and {"_aborted": True}
 
+    stopped_at = time.monotonic()
     # 자연 종료가 안 됐으면 분석도 시작되지 않으므로 폴링을 건너뜀
     ended = not args.natural or sock.named("measurement-complete")
     analysis = _wait(_analysis, args.analysis_timeout_sec, 2.0) if ended else None
@@ -411,6 +491,9 @@ def run(args: argparse.Namespace) -> dict:
     time.sleep(2)  # 중복 measurement-complete 수신 여부를 보려고 잠시 더 받음
     sessions = d.call("GET", f"/api/sessions/group/{group_id}/status", op)
     sock.close()
+    log_dir = Path(args.log_dir) if args.log_dir else None
+    if log_dir is not None:
+        time.sleep(max(0.0, stopped_at + LOG_SETTLE_SEC - time.monotonic()))
 
     csv_dir = Path(args.csv_dir)
     rows = {i: count_csv_rows(csv_dir, group_id, i) for i in (1, 2)}
@@ -428,7 +511,12 @@ def run(args: argparse.Namespace) -> dict:
             e.get("stopReason") for e in sock.named("measurement-complete")
         ],
     )
-    return {"groupId": group_id, "run": run_id, "verdict": verdict}
+    return {
+        "groupId": group_id,
+        "run": run_id,
+        "verdict": verdict,
+        "harness_counts": read_harness_counts(log_dir),
+    }
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -441,6 +529,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--csv-dir",
         required=True,
         help="재생 CSV가 쌓이는 폴더 (행 수 집계용, 보통 mind-signal/csv)",
+    )
+    p.add_argument(
+        "--log-dir",
+        help="harness.sh RUN_DIR. 주면 backend.log와 relay.log의 중복 수를 결과에 실음",
     )
     p.add_argument("--duration-sec", type=float, default=200)
     p.add_argument("--register-timeout-sec", type=float, default=60)
