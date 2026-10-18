@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
 _PATH = Path(__file__).resolve().parents[1] / "scripts" / "replay_driver.py"
 GROUP_ID = "6a72db3c2d01f2ce5c690b19"
 WAVES = {"waves": {"delta": 1.0}}
@@ -168,7 +171,9 @@ def test_non_natural_ignores_natural_items():
 
 
 class _FakeDriver:
-    """stop-all만 실패하는 백엔드 대역."""
+    """stop-all만 실패하는 백엔드 대역. stop_error에 던질 예외를 넣음."""
+
+    stop_error: Exception = RuntimeError("POST stop-all -> 500")
 
     def __init__(self, backend_url: str) -> None:
         """호출 경로를 기록할 목록을 만듦."""
@@ -182,7 +187,7 @@ class _FakeDriver:
         """경로별 최소 응답을 돌려주고 stop-all은 2xx 아님으로 실패시킴."""
         self.paths.append(path)
         if path.endswith("stop-all"):
-            raise RuntimeError("POST stop-all -> 500")
+            raise self.stop_error
         if path == "/api/engine/registry-status":
             return {"ready": True}
         if path.startswith("/api/sessions/group/"):
@@ -212,11 +217,18 @@ class _FakeSocket:
         """닫을 것이 없음."""
 
 
-def test_natural_timeout_keeps_verdict_when_stop_all_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("POST stop-all -> 500"), httpx.ConnectError("connection refused")],
+)
+def test_natural_timeout_keeps_verdict_when_stop_all_fails(
+    tmp_path, monkeypatch, error
+):
     """자연 종료 시간 초과 뒤 stop-all이 실패해도 groupId와 실패 판정이 남음."""
     wait = drv._wait
     monkeypatch.setattr(drv, "_wait", lambda p, t, i=1.0: wait(p, min(t, 0.05), 0.01))
     monkeypatch.setattr(drv.time, "sleep", lambda s: None)
+    monkeypatch.setattr(_FakeDriver, "stop_error", error)
     monkeypatch.setattr(drv, "Driver", _FakeDriver)
     monkeypatch.setattr(drv, "SocketRecorder", _FakeSocket)
     args = drv._parse_args(["--csv-dir", str(tmp_path), "--natural"])

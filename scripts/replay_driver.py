@@ -378,7 +378,7 @@ def run(args: argparse.Namespace) -> dict:
                     json={"groupId": group_id, "stopReason": "ProcessError"},
                 )
                 log(f"stop-all: {stop}")
-            except RuntimeError as e:
+            except (RuntimeError, httpx.HTTPError) as e:
                 # 정리 실패로 판정까지 잃지 않게 로그만 남기고 계속함
                 log(f"stop-all 실패: {e}")
     else:
