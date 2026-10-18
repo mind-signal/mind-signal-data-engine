@@ -370,13 +370,17 @@ def run(args: argparse.Namespace) -> dict:
             # 시간 초과: 판정은 measurement_complete 실패로 남고, 다음 실행이
             # 막히지 않게 남은 스트림을 정리함
             log("자연 종료 시간 초과. stop-all(ProcessError)로 스트림을 정리함")
-            stop = d.call(
-                "POST",
-                "/api/engine/stream/stop-all",
-                op,
-                json={"groupId": group_id, "stopReason": "ProcessError"},
-            )
-            log(f"stop-all: {stop}")
+            try:
+                stop = d.call(
+                    "POST",
+                    "/api/engine/stream/stop-all",
+                    op,
+                    json={"groupId": group_id, "stopReason": "ProcessError"},
+                )
+                log(f"stop-all: {stop}")
+            except RuntimeError as e:
+                # 정리 실패로 판정까지 잃지 않게 로그만 남기고 계속함
+                log(f"stop-all 실패: {e}")
     else:
         log(f"측정 시작. {args.duration_sec}초 대기함")
         time.sleep(args.duration_sec)

@@ -165,3 +165,64 @@ def test_non_natural_ignores_natural_items():
     v = _judge(stop_reasons=[None, None])
     assert v["pass"]
     assert "stop_reason" not in v and "tier_event" not in v
+
+
+class _FakeDriver:
+    """stop-all만 실패하는 백엔드 대역."""
+
+    def __init__(self, backend_url: str) -> None:
+        """호출 경로를 기록할 목록을 만듦."""
+        self.paths: list[str] = []
+
+    def user(self, email: str, password: str, name: str) -> str:
+        """가입 없이 토큰을 돌려줌."""
+        return "token"
+
+    def call(self, method: str, path: str, token: str | None = None, **kw) -> dict:
+        """경로별 최소 응답을 돌려주고 stop-all은 2xx 아님으로 실패시킴."""
+        self.paths.append(path)
+        if path.endswith("stop-all"):
+            raise RuntimeError("POST stop-all -> 500")
+        if path == "/api/engine/registry-status":
+            return {"ready": True}
+        if path.startswith("/api/sessions/group/"):
+            return {"data": {"sessions": [{"status": "MEASURING"}] * 2}}
+        return {"data": {"groupId": GROUP_ID, "pairingToken": "p", "token": "t"}}
+
+
+class _FakeSocket:
+    """join-room ack와 dual-session-ready만 주는 소켓 대역."""
+
+    acks = [({"ok": True},)]
+
+    def __init__(self, backend_url: str) -> None:
+        """인자는 쓰지 않음."""
+
+    def connect(self) -> None:
+        """연결하지 않음."""
+
+    def emit(self, event: str, data: object, ack_id: int | None = None) -> None:
+        """보내지 않음."""
+
+    def named(self, name: str) -> list:
+        """측정 시작 이벤트만 있음. measurement-complete는 오지 않음."""
+        return [{}] if name == "dual-session-ready" else []
+
+    def close(self) -> None:
+        """닫을 것이 없음."""
+
+
+def test_natural_timeout_keeps_verdict_when_stop_all_fails(tmp_path, monkeypatch):
+    """자연 종료 시간 초과 뒤 stop-all이 실패해도 groupId와 실패 판정이 남음."""
+    wait = drv._wait
+    monkeypatch.setattr(drv, "_wait", lambda p, t, i=1.0: wait(p, min(t, 0.05), 0.01))
+    monkeypatch.setattr(drv.time, "sleep", lambda s: None)
+    monkeypatch.setattr(drv, "Driver", _FakeDriver)
+    monkeypatch.setattr(drv, "SocketRecorder", _FakeSocket)
+    args = drv._parse_args(["--csv-dir", str(tmp_path), "--natural"])
+
+    result = drv.run(args)
+
+    assert result["groupId"] == GROUP_ID
+    assert result["verdict"]["measurement_complete"]["pass"] is False
+    assert result["verdict"]["pass"] is False
