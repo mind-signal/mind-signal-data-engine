@@ -36,8 +36,10 @@ srv.listen(Number(bePort), '127.0.0.1', async () => {
     process.execPath,
     [relayPath, '--port', relayPort, '--backend-url', `http://127.0.0.1:${bePort}`,
       '--delay-subject', '2', '--delay-ms', '300', '--dup-every', '2'],
-    { env: process.env, stdio: ['ignore', 'ignore', 'inherit'] },
+    { env: process.env, stdio: ['ignore', 'pipe', 'inherit'] },
   );
+  let out = '';
+  relay.stdout.on('data', (d) => (out += d));
   const base = `http://127.0.0.1:${relayPort}`;
   try {
     for (let i = 0; i < 50; i++) {
@@ -69,6 +71,9 @@ srv.listen(Number(bePort), '127.0.0.1', async () => {
     assert.deepStrictEqual(received.map((e) => e.seq), [1, 2, 2, 3, 4, 4]);
     assert.deepStrictEqual(received[1], received[2]);
     assert.deepStrictEqual(received[4], received[5]);
+    // 드라이버가 측정 직후 읽으므로 요약이 30초 주기를 기다리지 않고 곧 갱신돼야 함
+    for (let i = 0; i < 20 && !out.includes('중복 2'); i++) await new Promise((r) => setTimeout(r, 100));
+    assert(out.includes('[relay] 전달 4, 지연 1, 중복 2'), `relay 요약 없음: ${out}`);
     console.log('RELAY_CHECK_OK');
     c.close();
   } catch (e) {
