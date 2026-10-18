@@ -172,9 +172,10 @@ def read_harness_counts(log_dir: Path | None) -> dict:
         result["backend_reason"] = result["relay_reason"] = "--log-dir 미지정"
         return result
     backend_log = log_dir / "backend.log"
-    if backend_log.is_file():
+    backend_text, reason = _read_log(backend_log)
+    if backend_text is not None:
         backend: dict[str, dict[str, int]] = {}
-        for m in _BACKEND_SUMMARY.finditer(backend_log.read_text(errors="replace")):
+        for m in _BACKEND_SUMMARY.finditer(backend_text):
             t = backend.setdefault(m[1], {"duplicate": 0, "in_flight": 0})
             t["duplicate"] += int(m[2])
             t["in_flight"] += int(m[3])
@@ -183,18 +184,32 @@ def read_harness_counts(log_dir: Path | None) -> dict:
         else:
             result["backend_reason"] = "backend.log에 [/proxy] summary 줄 없음"
     else:
-        result["backend_reason"] = f"{backend_log} 없음"
+        result["backend_reason"] = reason
     relay_log = log_dir / "relay.log"
-    if relay_log.is_file():
-        found = _RELAY_SUMMARY.findall(relay_log.read_text(errors="replace"))
+    relay_text, reason = _read_log(relay_log, missing_note=" (중계기 미사용 실행)")
+    if relay_text is not None:
+        found = _RELAY_SUMMARY.findall(relay_text)
         if found:
             f, d, dup = (int(x) for x in found[-1])
             result["relay"] = {"forwarded": f, "delayed": d, "duplicated": dup}
         else:
             result["relay_reason"] = "relay.log에 요약 줄 없음"
     else:
-        result["relay_reason"] = f"{relay_log} 없음 (중계기 미사용 실행)"
+        result["relay_reason"] = reason
     return result
+
+
+def _read_log(path: Path, missing_note: str = "") -> tuple[str | None, str]:
+    """로그를 UTF-8로 읽음. 없거나 읽지 못하면 (None, 이유)를 돌려 판정 출력을 막지 않음.
+
+    로그에 한국어가 있어 Windows 기본 로케일(cp949)로 읽으면 요약 줄이 깨짐.
+    """
+    if not path.is_file():
+        return None, f"{path} 없음{missing_note}"
+    try:
+        return path.read_text(encoding="utf-8", errors="replace"), ""
+    except OSError as e:
+        return None, f"{path} 읽기 실패: {e}"
 
 
 def judge(

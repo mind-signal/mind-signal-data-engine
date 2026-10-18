@@ -148,7 +148,8 @@ def test_read_harness_counts_sums_backend_windows_and_takes_last_relay(
     (tmp_path / "relay.log").write_text(
         "[relay] :5101 → http://127.0.0.1:5100 (지연 없음)\n"
         "[relay] 전달 10, 지연 0, 중복 1\n"
-        "[relay] 전달 40, 지연 5, 중복 4\n"
+        "[relay] 전달 40, 지연 5, 중복 4\n",
+        encoding="utf-8",
     )
     c = drv.read_harness_counts(tmp_path)
     assert c["backend"] == {
@@ -168,6 +169,20 @@ def test_read_harness_counts_null_with_reason(tmp_path: Path):
     missing = drv.read_harness_counts(tmp_path)
     assert missing["backend"] is None and "backend.log" in missing["backend_reason"]
     assert missing["relay"] is None and "relay.log" in missing["relay_reason"]
+
+
+def test_read_harness_counts_unreadable_log_keeps_verdict(tmp_path: Path, monkeypatch):
+    """로그를 읽다 OSError가 나도 예외 없이 null과 이유를 남기는지 확인함."""
+    (tmp_path / "backend.log").write_text("x\n")
+    (tmp_path / "relay.log").write_text("x\n")
+
+    def deny(self, *a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    c = drv.read_harness_counts(tmp_path)
+    assert c["backend"] is None and "읽기 실패" in c["backend_reason"]
+    assert c["relay"] is None and "읽기 실패" in c["relay_reason"]
 
 
 def test_no_pairs_fails_both_pair_checks():
