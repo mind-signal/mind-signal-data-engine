@@ -90,3 +90,10 @@ def test_engine_secret_defaults_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENGINE_SECRET_KEY", "test-only-secret")
     module = _load_mock_module()
     assert module._secret_key == "test-only-secret"
+
+
+def test_empty_engine_secret_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """빈 시크릿이면 빈 헤더도 통과하므로 모듈 로드 단계에서 기동을 거절함."""
+    monkeypatch.setenv("ENGINE_SECRET_KEY", "")
+    with pytest.raises(SystemExit):
+        _load_mock_module()

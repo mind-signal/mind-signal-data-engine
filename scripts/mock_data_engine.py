@@ -73,6 +73,9 @@ _stream_active: bool = False  # 현재 스트리밍 중 여부
 _current_group_id: str | None = None  # 활성 groupId
 _subject_index: int = _args.subject_index  # 이 인스턴스 담당 subjectIndex
 _secret_key: str = _args.engine_secret
+# 빈 시크릿이면 빈 X-Engine-Secret 헤더도 인증을 통과하므로 기동하지 않음
+if not _secret_key:
+    raise SystemExit("ENGINE_SECRET_KEY 또는 --engine-secret가 비어 있음")
 
 
 # ──────────────────────────────────────────────
