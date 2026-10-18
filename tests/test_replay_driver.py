@@ -185,6 +185,18 @@ def test_read_harness_counts_unreadable_log_keeps_verdict(tmp_path: Path, monkey
     assert c["relay"] is None and "읽기 실패" in c["relay_reason"]
 
 
+def test_read_harness_counts_is_file_oserror_keeps_verdict(tmp_path: Path, monkeypatch):
+    """Python 3.10의 is_file()이 권한 문제로 OSError를 내도 null과 이유를 남기는지 확인함."""
+
+    def deny(self, *a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "is_file", deny)
+    c = drv.read_harness_counts(tmp_path)
+    assert c["backend"] is None and "읽기 실패" in c["backend_reason"]
+    assert c["relay"] is None and "읽기 실패" in c["relay_reason"]
+
+
 def test_no_pairs_fails_both_pair_checks():
     """aligned_pair가 없으면 쌍 판정 둘 다 실패하는지 확인함."""
     v = _judge(pairs=[], rows={1: 0, 2: 0})
