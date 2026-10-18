@@ -27,18 +27,19 @@ def _load() -> Any:
 drv = _load()
 
 
-def _pairs(both: int, single: int) -> list[dict]:
-    """양쪽 쌍 both개와 한쪽 쌍 single개로 된 aligned_pair 목록을 만듦."""
+def _pairs(both: int, single: int, single_subject: int = 1) -> list[dict]:
+    """양쪽 쌍 both개와 single_subject 한쪽만 있는 쌍 single개로 된 목록을 만듦."""
+    other = 3 - single_subject
     return [{"subject_1": WAVES, "subject_2": WAVES}] * both + [
-        {"subject_1": WAVES, "subject_2": None}
+        {f"subject_{single_subject}": WAVES, f"subject_{other}": None}
     ] * single
 
 
 def _judge(**over: Any) -> dict:
     """모든 항목이 통과하는 기본값으로 judge를 호출함. over로 인자를 바꿈."""
     kwargs = dict(
-        pairs=_pairs(190, 5),
-        rows={1: 200, 2: 198},
+        pairs=_pairs(200, 0),
+        rows={1: 200, 2: 200},
         complete_events=1,
         session_statuses=["COMPLETED", "COMPLETED"],
         analysis={"isBTI": False, "matchingScore": 70},
@@ -52,9 +53,15 @@ def test_all_pass():
     """기본 입력에서 판정 4개가 모두 통과하는지 확인함."""
     v = _judge()
     assert v["pass"]
-    assert v["aligned_pairs"]["both"] == 190
-    assert v["aligned_pairs"]["ratio"] == round(190 / 198, 4)
-    assert v["single_emit"]["single"] == 5
+    assert v["aligned_pairs"]["both"] == 200
+    assert v["aligned_pairs"]["ratio"] == 1.0
+    assert v["single_emit"]["single"] == 0
+    assert v["accounting"]["subjects"]["1"] == {
+        "sent": 200,
+        "paired": 200,
+        "single": 0,
+        "loss": 0,
+    }
 
 
 def test_paired_ratio_below_threshold_fails():
@@ -66,9 +73,116 @@ def test_paired_ratio_below_threshold_fails():
 
 def test_single_emit_ratio_over_threshold_fails():
     """단독 emit 비율이 기준 초과면 실패하는지 확인함."""
-    v = _judge(pairs=_pairs(190, 30))
+    pairs = _pairs(196, 4) + _pairs(0, 4, single_subject=2)
+    v = _judge(pairs=pairs, rows={1: 200, 2: 200})
     assert v["aligned_pairs"]["pass"]
+    assert v["accounting"]["pass"]
     assert not v["single_emit"]["pass"]
+
+
+def test_pair_count_over_sent_rows_fails():
+    """정렬 쌍이 어느 subject의 보낸 행보다 많으면(중복 쌍) 실패하는지 확인함."""
+    v = _judge(pairs=_pairs(205, 0), rows={1: 200, 2: 205})
+    assert not v["aligned_pairs"]["pass"]
+    assert v["accounting"]["subjects"]["1"]["loss"] == -5
+    assert not v["accounting"]["pass"]
+    assert not v["pass"]
+
+
+def test_one_sided_loss_is_not_hidden_by_min_rows():
+    """한쪽 subject만 행을 잃으면 분모 min(rows)로 가려지지 않고 실패하는지 확인함."""
+    v = _judge(pairs=_pairs(180, 0), rows={1: 202, 2: 180})
+    assert v["accounting"]["subjects"]["1"]["loss"] == 22
+    assert not v["accounting"]["pass"]
+    assert not v["aligned_pairs"]["pass"]
+    assert not v["pass"]
+
+
+@pytest.mark.parametrize("run", ["OPS-W019 run3", "EEG-W007 t5 1차"])
+def test_pre_fix_resend_run_fails(run: str):
+    """수정 전 결함 결과(쌍 201, 단독 20/221, 행 202/201)가 실패하는지 확인함.
+
+    두 결과 JSON의 집계값만 옮김. 단독 20건은 재전송한 엔진 2의 행임(PLAN 6.5a).
+    """
+    v = _judge(pairs=_pairs(201, 20, single_subject=2), rows={1: 202, 2: 201})
+    assert not v["single_emit"]["pass"], run
+    assert v["accounting"]["subjects"]["1"]["loss"] == 1
+    assert v["accounting"]["subjects"]["2"]["loss"] == -20
+    assert not v["accounting"]["pass"]
+    assert not v["pass"]
+
+
+def test_expected_after_eeg_w008_passes():
+    """EEG-W008 반영 뒤 기대값(쌍 202/202, 단독 0, 손실 0)이 통과하는지 확인함."""
+    v = _judge(pairs=_pairs(202, 0), rows={1: 202, 2: 202})
+    assert v["pass"]
+    for s in ("1", "2"):
+        assert v["accounting"]["subjects"][s]["loss"] == 0
+
+
+def test_stop_flush_single_of_longer_subject_passes():
+    """한쪽이 1행 덜 보내 남은 행이 정지 flush로 단독 emit되면 손실 0으로 통과함."""
+    v = _judge(pairs=_pairs(201, 1, single_subject=1), rows={1: 202, 2: 201})
+    assert v["accounting"]["subjects"]["1"] == {
+        "sent": 202,
+        "paired": 201,
+        "single": 1,
+        "loss": 0,
+    }
+    assert v["pass"]
+
+
+def test_read_harness_counts_sums_backend_windows_and_takes_last_relay(
+    tmp_path: Path,
+):
+    """백엔드 창별 요약은 더하고 중계기 누적 요약은 마지막 줄을 쓰는지 확인함."""
+    (tmp_path / "backend.log").write_text(
+        "[/proxy] summary subject=2 received=11 published=10 duplicate=1 "
+        "in_flight=0 invalid=0 channels=[c]\n"
+        "other line\n"
+        "[/proxy] summary subject=1 received=10 published=10 duplicate=0 "
+        "in_flight=0 invalid=0 channels=[c]\n"
+        "[/proxy] summary subject=2 received=13 published=10 duplicate=1 "
+        "in_flight=2 invalid=0 channels=[c]\n"
+    )
+    (tmp_path / "relay.log").write_text(
+        "[relay] :5101 → http://127.0.0.1:5100 (지연 없음)\n"
+        "[relay] 전달 10, 지연 0, 중복 1\n"
+        "[relay] 전달 40, 지연 5, 중복 4\n",
+        encoding="utf-8",
+    )
+    c = drv.read_harness_counts(tmp_path)
+    assert c["backend"] == {
+        "1": {"duplicate": 0, "in_flight": 0},
+        "2": {"duplicate": 2, "in_flight": 2},
+    }
+    assert c["relay"] == {"forwarded": 40, "delayed": 5, "duplicated": 4}
+    assert "backend_reason" not in c and "relay_reason" not in c
+
+
+def test_read_harness_counts_null_with_reason(tmp_path: Path):
+    """로그 폴더가 없거나 로그 파일이 없으면 null과 이유를 남기는지 확인함."""
+    none = drv.read_harness_counts(None)
+    assert none["backend"] is None and none["relay"] is None
+    assert none["backend_reason"] and none["relay_reason"]
+
+    missing = drv.read_harness_counts(tmp_path)
+    assert missing["backend"] is None and "backend.log" in missing["backend_reason"]
+    assert missing["relay"] is None and "relay.log" in missing["relay_reason"]
+
+
+def test_read_harness_counts_unreadable_log_keeps_verdict(tmp_path: Path, monkeypatch):
+    """로그를 읽다 OSError가 나도 예외 없이 null과 이유를 남기는지 확인함."""
+    (tmp_path / "backend.log").write_text("x\n")
+    (tmp_path / "relay.log").write_text("x\n")
+
+    def deny(self, *a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    c = drv.read_harness_counts(tmp_path)
+    assert c["backend"] is None and "읽기 실패" in c["backend_reason"]
+    assert c["relay"] is None and "읽기 실패" in c["relay_reason"]
 
 
 def test_no_pairs_fails_both_pair_checks():

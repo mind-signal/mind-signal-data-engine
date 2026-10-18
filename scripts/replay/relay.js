@@ -159,9 +159,13 @@ function main() {
     up.on('disconnect', () => socket.disconnect(true));
   });
 
-  const summary = () =>
-    console.log(`[relay] 전달 ${counts.forwarded}, 지연 ${counts.delayed}, 중복 ${counts.duplicated}`);
-  setInterval(summary, 30000).unref();
+  // 누적 요약을 값이 바뀐 때만 1초 안에 찍음. 30초 주기면 드라이버가 측정 직후
+  // relay.log를 읽을 때 마지막 구간의 중복 수가 빠짐(OPS-W019 7절 B6)
+  let last = '';
+  setInterval(() => {
+    const line = `[relay] 전달 ${counts.forwarded}, 지연 ${counts.delayed}, 중복 ${counts.duplicated}`;
+    if (line !== last) console.log((last = line));
+  }, 1000).unref();
 
   server.listen(cfg.port, '127.0.0.1', () => {
     const delay = cfg.delaySubject ? `subject ${cfg.delaySubject} +${cfg.delayMs}ms` : '지연 없음';
