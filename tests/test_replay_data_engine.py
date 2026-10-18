@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from fastapi.testclient import TestClient
@@ -67,6 +67,16 @@ def _cfg(tmp_path: Path, src: Path, **over: Any) -> Any:
     )
     kwargs.update(over)
     return rde.ReplayConfig(**kwargs)
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """predicate가 참이 될 때까지 최대 timeout초 기다림. 시간 초과면 False."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 def test_header_matches_engine_column_order():
@@ -144,6 +154,9 @@ def test_replay_posts_envelopes_and_writes_engine_csv(
     assert stats == {"rows": 2, "sent": 3, "failed": 0, "skipped": 1}
     bodies = [json.loads(r.content) for r in httpx_mock.get_requests()]
     assert [b["seq"] for b in bodies] == [1, 2, 2]
+    # 재전송은 실제 엔진 재시도처럼 de_ts_ns까지 같은 envelope임
+    assert bodies[1] == bodies[2]
+    assert bodies[0]["de_ts_ns"] != bodies[1]["de_ts_ns"]
     first = bodies[0]
     assert first["group_id"] == GROUP_ID and first["subject_idx"] == 2
     assert first["de_ts_ns"].isdigit()
@@ -218,3 +231,67 @@ def test_stop_uploads_csv_before_responding(tmp_path: Path, httpx_mock: HTTPXMoc
     assert uploads[0].url.params["filename"].startswith(f"subject_2_{GROUP_ID}_")
     assert uploads[0].headers["Content-Type"] == "text/csv"
     assert uploads[0].content.startswith(b"timestamp,delta")
+
+
+def test_natural_end_uploads_once_after_max_rows(tmp_path: Path, httpx_mock: HTTPXMock):
+    """--natural-end는 max_rows만큼 보낸 뒤 CSV를 한 번 올리는지 확인함."""
+    httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
+    httpx_mock.add_response(url=re.compile(rf"{BACKEND}/api/engine/csv-upload.*"))
+    src = _write_csv(
+        tmp_path / "in.csv",
+        [_row(f"2026-09-07 10:00:00.0{i}") for i in range(5)],
+    )
+    cfg = _cfg(tmp_path, src, natural_end=True, max_rows=3)
+    cfg.csv_dir.mkdir()
+    out = cfg.csv_dir / f"subject_2_{GROUP_ID}_20261018_100000.csv"
+    stats = {"rows": 0, "sent": 0, "failed": 0, "skipped": 0}
+    asyncio.run(rde._replay(cfg, GROUP_ID, out, stats))
+
+    assert stats["rows"] == 3 and stats["natural_uploaded"] is True
+    paths = [r.url.path for r in httpx_mock.get_requests()]
+    assert paths.count("/ingest/sample") == 3
+    assert paths[-1] == "/api/engine/csv-upload"
+
+
+def test_stop_after_natural_end_matches_real_engine(
+    tmp_path: Path, httpx_mock: HTTPXMock
+):
+    """자연 종료 뒤 stop은 실제 엔진처럼 다시 올리고, /health 정리 뒤에는 404인지 확인함."""
+    httpx_mock.add_response(url=f"{PROXY}/register", is_reusable=True, is_optional=True)
+    httpx_mock.add_response(url=f"{PROXY}/ingest/sample", is_reusable=True)
+    httpx_mock.add_response(
+        url=re.compile(rf"{BACKEND}/api/engine/csv-upload.*"), is_reusable=True
+    )
+    src = _write_csv(tmp_path / "in.csv", [_row("2026-09-07 10:00:00")])
+    app = rde.create_app(_cfg(tmp_path, src, natural_end=True))
+    body = {"group_id": GROUP_ID, "subject_index": 2}
+    headers = {"X-Engine-Secret": SECRET}
+
+    def uploads() -> int:
+        """지금까지 csv-upload 요청 수를 셈."""
+        return sum(
+            r.url.path == "/api/engine/csv-upload" for r in httpx_mock.get_requests()
+        )
+
+    with TestClient(app) as client:
+        client.post("/api/stream/start", json=body, headers=headers)
+        assert _wait_until(lambda: uploads() == 1)  # 재생과 자연 종료 업로드
+        assert client.post("/api/stream/stop", json=body, headers=headers).json()[
+            "uploaded"
+        ]
+        assert uploads() == 2
+
+        client.post("/api/stream/start", json=body, headers=headers)
+        assert _wait_until(lambda: uploads() == 3)
+        assert client.get("/health").json()["streaming"] is False
+        stop = client.post("/api/stream/stop", json=body, headers=headers)
+        assert stop.status_code == 404
+        assert uploads() == 3
+
+
+def test_max_rows_rejects_negative(tmp_path: Path):
+    """--max-rows 음수는 실행 전에 거부함."""
+    base = ["--subject-index", "1", "--port", "5011", "--csv", str(tmp_path / "a.csv")]
+    assert rde._parse_args([*base, "--max-rows", "0"]).max_rows == 0
+    with pytest.raises(SystemExit):
+        rde._parse_args([*base, "--max-rows", "-1"])

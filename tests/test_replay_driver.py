@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
 _PATH = Path(__file__).resolve().parents[1] / "scripts" / "replay_driver.py"
 GROUP_ID = "6a72db3c2d01f2ce5c690b19"
 WAVES = {"waves": {"delta": 1.0}}
@@ -139,3 +142,99 @@ def test_socket_recorder_parses_events_acks_and_pings():
     assert rec.acks == [[{"ok": True, "groupId": "g"}]]
     assert rec.named("aligned_pair") == [{"subject_1": None}]
     assert rec.named("measurement-complete") == [{"status": "COMPLETED"}]
+
+
+def test_natural_adds_stop_reason_and_tier_event():
+    """natural이면 stop_reason과 tier_event가 판정에 들어가는지 확인함."""
+    ok = _judge(
+        natural=True,
+        stop_reasons=["Natural", "Natural"],
+        analysis_status_events=[{"tier": "VALID"}],
+    )
+    assert ok["pass"] and ok["analysis"]["pass"]
+    assert ok["tier_event"]["tiers"] == ["VALID"]
+
+    before_w008 = _judge(natural=True, stop_reasons=[None, None])
+    assert not before_w008["stop_reason"]["pass"]
+    assert not before_w008["tier_event"]["pass"]
+    assert not before_w008["pass"]
+
+    manual = _judge(natural=True, stop_reasons=["Natural", "ManualEarly"])
+    assert not manual["stop_reason"]["pass"]
+
+
+def test_non_natural_ignores_natural_items():
+    """natural이 아니면 자연 종료 항목을 넣지 않는지 확인함."""
+    v = _judge(stop_reasons=[None, None])
+    assert v["pass"]
+    assert "stop_reason" not in v and "tier_event" not in v
+
+
+class _FakeDriver:
+    """stop-all만 실패하는 백엔드 대역. stop_error에 던질 예외를 넣음."""
+
+    stop_error: Exception = RuntimeError("POST stop-all -> 500")
+
+    def __init__(self, backend_url: str) -> None:
+        """호출 경로를 기록할 목록을 만듦."""
+        self.paths: list[str] = []
+
+    def user(self, email: str, password: str, name: str) -> str:
+        """가입 없이 토큰을 돌려줌."""
+        return "token"
+
+    def call(self, method: str, path: str, token: str | None = None, **kw) -> dict:
+        """경로별 최소 응답을 돌려주고 stop-all은 2xx 아님으로 실패시킴."""
+        self.paths.append(path)
+        if path.endswith("stop-all"):
+            raise self.stop_error
+        if path == "/api/engine/registry-status":
+            return {"ready": True}
+        if path.startswith("/api/sessions/group/"):
+            return {"data": {"sessions": [{"status": "MEASURING"}] * 2}}
+        return {"data": {"groupId": GROUP_ID, "pairingToken": "p", "token": "t"}}
+
+
+class _FakeSocket:
+    """join-room ack와 dual-session-ready만 주는 소켓 대역."""
+
+    acks = [({"ok": True},)]
+
+    def __init__(self, backend_url: str) -> None:
+        """인자는 쓰지 않음."""
+
+    def connect(self) -> None:
+        """연결하지 않음."""
+
+    def emit(self, event: str, data: object, ack_id: int | None = None) -> None:
+        """보내지 않음."""
+
+    def named(self, name: str) -> list:
+        """측정 시작 이벤트만 있음. measurement-complete는 오지 않음."""
+        return [{}] if name == "dual-session-ready" else []
+
+    def close(self) -> None:
+        """닫을 것이 없음."""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("POST stop-all -> 500"), httpx.ConnectError("connection refused")],
+)
+def test_natural_timeout_keeps_verdict_when_stop_all_fails(
+    tmp_path, monkeypatch, error
+):
+    """자연 종료 시간 초과 뒤 stop-all이 실패해도 groupId와 실패 판정이 남음."""
+    wait = drv._wait
+    monkeypatch.setattr(drv, "_wait", lambda p, t, i=1.0: wait(p, min(t, 0.05), 0.01))
+    monkeypatch.setattr(drv.time, "sleep", lambda s: None)
+    monkeypatch.setattr(_FakeDriver, "stop_error", error)
+    monkeypatch.setattr(drv, "Driver", _FakeDriver)
+    monkeypatch.setattr(drv, "SocketRecorder", _FakeSocket)
+    args = drv._parse_args(["--csv-dir", str(tmp_path), "--natural"])
+
+    result = drv.run(args)
+
+    assert result["groupId"] == GROUP_ID
+    assert result["verdict"]["measurement_complete"]["pass"] is False
+    assert result["verdict"]["pass"] is False
