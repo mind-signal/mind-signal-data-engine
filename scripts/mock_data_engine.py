@@ -6,11 +6,13 @@
 실행 예시:
   python scripts/mock_data_engine.py --subject-index 1 --port 8001
   python scripts/mock_data_engine.py --subject-index 2 --port 8002
+시크릿은 환경 변수 ENGINE_SECRET_KEY로 줌 (명령 인자에 쓰지 않음)
 """
 
 import argparse
 import asyncio
 import math
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -39,8 +41,10 @@ _parser.add_argument(
 _parser.add_argument(
     "--engine-secret",
     type=str,
-    default="change-me-in-production",
-    help="X-Engine-Secret 헤더 검증용 시크릿 키",
+    # 시크릿을 명령 인자로 넘기지 않도록 환경 변수를 기본값으로 읽음.
+    # 인자는 하위 호환을 위해 남기며 주면 환경 변수보다 우선함
+    default=os.environ.get("ENGINE_SECRET_KEY", "change-me-in-production"),
+    help="X-Engine-Secret 헤더 검증용 시크릿 키 (기본값: 환경 변수 ENGINE_SECRET_KEY)",
 )
 _parser.add_argument(
     "--backend-url",

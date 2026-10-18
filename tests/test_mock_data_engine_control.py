@@ -36,7 +36,10 @@ def _load_mock_module() -> Any:
 
 @pytest.fixture(scope="module")
 def mock_app() -> Any:
-    return _load_mock_module()
+    # 셸의 ENGINE_SECRET_KEY 가 있어도 DEFAULT_SECRET 으로 고정해 읽음
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("ENGINE_SECRET_KEY", DEFAULT_SECRET)
+        return _load_mock_module()
 
 
 def test_assign_group_without_header_is_rejected(mock_app) -> None:
@@ -80,3 +83,10 @@ def test_assign_group_with_valid_secret_registers(
 
     register = [r for r in httpx_mock.get_requests() if "register-dual" in str(r.url)]
     assert register, "BE /register-dual 호출이 없음"
+
+
+def test_engine_secret_defaults_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--engine-secret 없이 환경 변수 ENGINE_SECRET_KEY 를 시크릿으로 씀."""
+    monkeypatch.setenv("ENGINE_SECRET_KEY", "test-only-secret")
+    module = _load_mock_module()
+    assert module._secret_key == "test-only-secret"
