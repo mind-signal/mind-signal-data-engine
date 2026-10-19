@@ -131,9 +131,10 @@ MindSignal은 여러 저장소로 된 제품이므로 `.plans/`는 제품 단위
 
 `Team-project/.plans/`(루트)와 혼동하지 말 것 — 그쪽은 2026-07-30 통합 이후 크로스 프로젝트 메타 전용이고, 폴더에 번호가 붙어 있어도 MindSignal 계획은 없다.
 
-판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인 접두사(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 `DASHBOARD.md`다.
+판단에 필요한 요지(정본 파일에 접근 못 해도 알아야 할 것): 작업 폴더명은 `{WORK-ID}[-{slug}]` 형식이고 Work ID는 도메인 접두사(`OPS`, `SESSION` 등. 전체 목록은 정본의 접두사 레지스트리)별 독립 채번이며 전역 순번이 아니다. 신규는 W001부터, 소급 부여분은 W101부터 시작한다(예: `SESSION-W114`는 전체 114번째가 아니라 SESSION 소급 14번째). 번호는 영구 식별자라 재사용하지 않으므로 번호 공백은 오류가 아니다. 작업 상태의 정본은 각 Work 폴더 `PLAN.md` 머리말의 `status`이고, 열린 작업 목록과 다음 행동은 `DASHBOARD.md`다(2026-10-19 DOCS-W013).
 
-- 현재 작업 정본: `mind-signal/.plans/DASHBOARD.md`
+- Work 상태와 우선순위 정본: 각 Work 폴더 `mind-signal/.plans/{Work 폴더}/PLAN.md` 머리말
+- 열린 작업 목록과 다음 행동: `mind-signal/.plans/DASHBOARD.md`
 - 세션 핸드오프 정본: `mind-signal/.plans/HANDOFF.md` (대체 시 `_archive/HANDOFF-YYYYMMDD.md`)
 - ID·상태·브랜치 이름 규칙 정본: `mind-signal/.plans/README.md`
 - 소급 Work ID 매핑: `mind-signal/.plans/LEGACY-REGISTRY.md`
