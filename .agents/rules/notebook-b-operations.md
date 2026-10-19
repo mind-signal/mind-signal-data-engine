@@ -13,16 +13,20 @@ changes:
 
 ## Starting the live-device engine
 
-Start DE_B with the dedicated launcher:
+Start DE_B from the launcher folder (`mind-signal-launcher`) by double-clicking
+`start-b.bat`, or from a terminal:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\realdevice\start-realdevice-notebook-b.ps1 -EngineSecret <same key as operator>
+```bat
+<launcher>\start-b.bat
 ```
 
-`-OperatorIp` defaults to `operator`. If that name resolves to the wrong PC,
-correct the Tailscale device name instead of substituting a temporary IP. The
-launcher uses the absolute conda Python path, so it does not depend on
-`conda activate` in `cmd`.
+Stop it with `<launcher>\stop-b.bat`.
+
+`start-b.bat` runs `scripts\b-start.ps1 -Operator <name>`; `-Operator` is the
+operator PC's MagicDNS name and defaults to `operator`. If that name resolves
+to the wrong PC, correct the Tailscale device name instead of substituting a
+temporary IP. The launcher runs the engine with the engine venv created by the
+launcher's install, so it does not depend on `conda activate` in `cmd`.
 
 The launcher injects these runtime values, which take precedence over stale
 values in `.env.local`:
@@ -34,7 +38,9 @@ BACKEND_URL=http://operator:5000
 ALIGNMENT_LOCATION=proxy
 REGISTRATION_MODE=local
 DUAL_2PC_SUBJECT_INDEX=2
-ENGINE_SECRET_KEY=<argument or parent environment variable>
+MESSAGE_BUS=memory   # or redis; must match the operator PC
+DEV_RELOAD=0         # no uvicorn reload: .venv sits inside the watched folder
+# ENGINE_SECRET_KEY is not injected; the engine reads it from .env.local
 ```
 
 Only `CLIENT_ID`, `CLIENT_SECRET`, and `ENGINE_SECRET_KEY` need to be maintained
