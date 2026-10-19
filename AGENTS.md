@@ -43,7 +43,7 @@ mind-signal-data-engine/
 
 `.env.local`에는 `CLIENT_ID`, `CLIENT_SECRET`, `REDIS_HOST`, `REDIS_PORT`, `FASTAPI_PORT`, `USE_NGROK`, `BACKEND_URL`, `ENGINE_SECRET_KEY`가 필요함. Redis 채널 자체는 `core.main`의 위치 인수(groupId, subjectIndex)로 결정되며 환경변수와 무관. `MESSAGE_BUS`(기본 `redis`)를 `memory`로 두면 Redis 없이 샘플과 헤드셋 상태 경보를 프록시로 보내며, 이때 `ALIGNMENT_LOCATION=proxy`와 `PROXY_URL`이 필요함 — 상세는 `.agents/rules/redis-contract.md`의 `MESSAGE_BUS=memory` 절.
 
-머신마다 반복되는 환경 함정이 둘 있다: Cortex TLS 루트 인증서는 gitignore 대상이라 새 머신마다 손으로 복사해야 하고, `LAN_IP` 해석에는 Tailscale이 개입할 때 지켜야 할 우선순위가 있다. 둘 다 `.agents/rules/troubleshooting.md`에 상세 — "헤드셋은 찾았는데 세션이 즉시 끝남" 또는 "operator가 이 엔진에 도달 못함" 증상을 디버깅하기 전에 먼저 읽을 것. 노트북 B(DE_B, subject 2)는 고정 IP가 아니라 MagicDNS 이름 `operator`로 프록시(5050)와 백엔드(5000)에 붙고 `scripts/realdevice/start-realdevice-notebook-b.ps1`로 기동한다. 기동 확인 기준과 실패 진단 순서는 `.agents/rules/notebook-b-operations.md`.
+머신마다 반복되는 환경 함정이 둘 있다: Cortex TLS 루트 인증서는 gitignore 대상이라 새 머신마다 손으로 복사해야 하고, `LAN_IP` 해석에는 Tailscale이 개입할 때 지켜야 할 우선순위가 있다. 둘 다 `.agents/rules/troubleshooting.md`에 상세 — "헤드셋은 찾았는데 세션이 즉시 끝남" 또는 "operator가 이 엔진에 도달 못함" 증상을 디버깅하기 전에 먼저 읽을 것. 노트북 B(DE_B, subject 2)는 고정 IP가 아니라 MagicDNS 이름 `operator`로 프록시(5050)와 백엔드(5000)에 붙고, 런처 저장소 `mind-signal-launcher`의 `start-b.bat`으로 기동한다. 기동 확인 기준과 실패 진단 순서는 `.agents/rules/notebook-b-operations.md`.
 
 ## 5. 코드 스타일
 
